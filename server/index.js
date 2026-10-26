@@ -499,7 +499,8 @@ function serveStatic(req, res, url) {
   if (relative.startsWith('..') || path.isAbsolute(relative)) {
     res.writeHead(403); return res.end('Forbidden');
   }
-  const filePath = path.join(DIST, requested);
+  // let, not const: the SPA fallback below re-points filePath to index.html.
+  let filePath = path.join(DIST, requested);
 
   // Single-page app: unknown paths fall back to index.html so client-side
   // routing works on a hard refresh.
