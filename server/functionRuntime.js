@@ -152,7 +152,10 @@ export function makeBase44Shim(store, { getRegistry } = {}) {
         const defaults = {
           anthropic: 'claude-sonnet-4-5',
           openai: 'gpt-4o-mini',
-          google: 'gemini-2.0-flash',
+          // LOCAL FIX: was 'gemini-2.0-flash' — sunset by Google (404 on every
+          // call). The alias tracks Google's current flash model and cannot
+          // 404; a specific version can. .env's LLM_MODEL, when set, wins.
+          google: 'gemini-flash-latest',
         };
 
         // LOCAL FIX: Base44-billing-era model names. aiMarketIntelligence and
