@@ -1,0 +1,175 @@
+import { createClientFromRequest } from 'npm:@base44/sdk@0.8.48';
+
+/**
+ * Trading Scheduler - Runs every 2 minutes
+ * Processes auto-trading for all users with enabled settings
+ */
+Deno.serve(async (req) => {
+  try {
+    const base44 = createClientFromRequest(req);
+    
+    // Health check endpoint
+    const url = new URL(req.url);
+    if (url.searchParams.get('check_only') === 'true') {
+      return Response.json({ 
+        status: 'healthy',
+        backend_trading: true,
+        message: '24/7 server-side trading active'
+      });
+    }
+
+    // Auth: require an authenticated admin. The platform scheduler's
+    // invoke_backend_function provides the service-role auth context
+    // (admin-level). The base44-service-authorization header is NOT trusted
+    // — it can be spoofed by any external caller.
+    try {
+      const caller = await base44.auth.me();
+      if (!caller || caller.role !== 'admin') {
+        return Response.json({ success: false, error: 'Forbidden' }, { status: 403 });
+      }
+    } catch {
+      return Response.json({ success: false, error: 'Forbidden' }, { status: 403 });
+    }
+
+    console.log('🤖 Trading Scheduler: Starting auto-trading check for all users');
+    
+    // Get all users with auto-trading enabled (using service role)
+    const autoTradingSettings = await base44.asServiceRole.entities.AutoTradingSettings.list();
+    // Filter out users who have explicitly selected 'browser' execution mode
+    const enabledSettings = autoTradingSettings.filter(s => s.is_enabled && s.execution_mode !== 'browser');
+    
+    console.log(`📊 Found ${enabledSettings.length} users with server-side auto-trading enabled`);
+    
+    let processed = 0;
+    let executed = 0;
+    let errors = 0;
+    const lastError = [];
+    const userDetails = [];
+
+    for (let i = 0; i < enabledSettings.length; i++) {
+      const settings = enabledSettings[i];
+      try {
+        // Get user's portfolio
+        const portfolios = await base44.asServiceRole.entities.Portfolio.filter({
+          created_by: settings.created_by
+        });
+
+        if (!portfolios || portfolios.length === 0) {
+          console.log(`⚠️ No portfolio found for user ${i}`);
+          continue;
+        }
+
+        const portfolio = portfolios[0];
+
+        // Invoke auto-trading worker for this user. The worker fetches settings
+        // and portfolio from the DB by ID — we only pass identifiers, never the
+        // records themselves, so the worker cannot be fed crafted data.
+        console.log(`⏳ Invoking worker for user ${i}...`);
+        const invokeArgs = {
+          settings_id: settings.id,
+          user_email: settings.created_by
+        };
+
+        // Call the worker via the platform's user-scoped invocation mechanism.
+        // base44.functions.invoke passes through the admin caller's identity so
+        // the worker can authenticate it — a raw fetch to the public URL with a
+        // forwarded header was spoofable and a security vulnerability.
+        let result;
+        try {
+          const response = await base44.functions.invoke('autoTradingWorker', invokeArgs);
+          result = response?.data ?? response;
+          if (response?.status && response.status >= 400) {
+            throw { response: { status: response.status, data: result } };
+          }
+        } catch (invokeErr) {
+          const status = invokeErr.response?.status ?? 500;
+          const body = invokeErr.response?.data ?? {};
+          console.error(`⚠️ Worker failed for user ${i}:`, body?.error || invokeErr.message, 'status:', status);
+          lastError.push({ user_index: i, error: body?.error || invokeErr.message, status });
+          errors++;
+          processed++;
+          continue;
+        }
+
+        processed++;
+
+        if (result?.success) {
+          const tradeCount = result.trades?.length ?? 0;
+          if (tradeCount > 0) {
+            executed += tradeCount;
+            const buys = result.trades.filter(t => t.action === 'buy').length;
+            const sells = result.trades.filter(t => t.action === 'sell').length;
+            console.log(`✅ ${tradeCount} trade(s) for user ${i}: ${buys} buy, ${sells} sell`);
+          } else if (result.halted) {
+            console.log(`🛑 Halted for user ${i}: ${result.reason}`);
+          } else if (result.skipped) {
+            console.log(`⏭️ Skipped for user ${i}: ${result.reason}`);
+          } else {
+            console.log(`ℹ️ No trade for user ${i} (scanned ${result.scanned ?? 0})`);
+          }
+          userDetails.push({
+            settings_id: settings.id,
+            created_by: settings.created_by,
+            trades_executed: tradeCount,
+            scanned: result.scanned ?? 0,
+            halted: result.halted || false,
+            skipped: result.skipped || false,
+            reason: result.reason || null,
+            equity: result.equity,
+            equity_change: result.equityChange,
+            realized_pnl: result.realizedPnL,
+            open_positions: result.openPositions,
+            new_entries_allowed: result.newEntriesAllowed,
+            trade_actions: (result.trades || []).map(t => ({
+              action: t.action || t.trade_type,
+              asset_symbol: t.asset_symbol,
+              quantity: t.quantity,
+              price: t.price,
+              reason: t.reason,
+            })),
+          });
+        } else {
+          console.error(`⚠️ Worker failed for user ${i}:`, result?.error || 'Unknown error');
+          lastError.push({ user_index: i, error: result?.error || 'Unknown error', status: 500 });
+          userDetails.push({
+            settings_id: settings.id,
+            created_by: settings.created_by,
+            error: result?.error || 'Unknown error',
+          });
+          errors++;
+        }
+      } catch (error) {
+        errors++;
+        console.error(`❌ Error processing user ${i}:`, error.message);
+        lastError.push({
+          user_index: i,
+          message: error.message,
+        });
+      }
+    }
+    
+    const summary = {
+      timestamp: new Date().toISOString(),
+      users_checked: enabledSettings.length,
+      users_processed: processed,
+      trades_executed: executed,
+      errors: errors
+    };
+    
+    console.log('📊 Trading Scheduler Summary:', summary);
+    
+    return Response.json({
+      success: true,
+      summary,
+      userDetails,
+      lastError
+    });
+    
+  } catch (error) {
+    console.error('❌ Trading Scheduler Error:', error);
+    return Response.json({ 
+      success: false, 
+      error: 'Scheduler run failed' 
+    }, { status: 500 });
+  }
+});

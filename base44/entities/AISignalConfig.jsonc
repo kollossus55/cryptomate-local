@@ -1,0 +1,249 @@
+{
+  "name": "AISignalConfig",
+  "type": "object",
+  "properties": {
+    "config_name": {
+      "type": "string",
+      "description": "Name of this signal configuration"
+    },
+    "is_active": {
+      "type": "boolean",
+      "default": true,
+      "description": "Whether this config is active"
+    },
+    "data_sources": {
+      "type": "object",
+      "properties": {
+        "technical_indicators": {
+          "type": "boolean",
+          "default": true
+        },
+        "anomaly_detection": {
+          "type": "boolean",
+          "default": true
+        }
+      },
+      "description": "Enabled data sources"
+    },
+    "anomaly_config": {
+      "type": "object",
+      "properties": {
+        "detection_method": {
+          "type": "string",
+          "enum": [
+            "statistical",
+            "ml_based",
+            "hybrid"
+          ],
+          "default": "hybrid"
+        },
+        "sensitivity": {
+          "type": "string",
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "default": "medium"
+        },
+        "anomaly_types": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "volume_spike",
+              "price_manipulation",
+              "whale_activity",
+              "flash_crash",
+              "pump_dump"
+            ]
+          },
+          "default": [
+            "volume_spike",
+            "whale_activity",
+            "pump_dump"
+          ]
+        }
+      },
+      "description": "Anomaly detection configuration"
+    },
+    "signal_thresholds": {
+      "type": "object",
+      "properties": {
+        "strong_buy": {
+          "type": "number",
+          "default": 80
+        },
+        "buy": {
+          "type": "number",
+          "default": 70
+        },
+        "hold": {
+          "type": "number",
+          "default": 50
+        },
+        "sell": {
+          "type": "number",
+          "default": 40
+        },
+        "strong_sell": {
+          "type": "number",
+          "default": 30
+        }
+      },
+      "description": "Confidence thresholds for different signals"
+    },
+    "indicator_settings": {
+      "type": "object",
+      "description": "Enabled technical indicators for signal generation",
+      "properties": {
+        "supply_demand": {
+          "type": "boolean",
+          "default": true,
+          "description": "Supply & Demand zones \u2014 detects consolidation bases preceding impulse moves and scores price interaction with unmitigated zones."
+        },
+        "rsi": {
+          "type": "boolean",
+          "default": true
+        },
+        "macd": {
+          "type": "boolean",
+          "default": true
+        },
+        "bollinger": {
+          "type": "boolean",
+          "default": true
+        },
+        "ema": {
+          "type": "boolean",
+          "default": true
+        },
+        "stoch": {
+          "type": "boolean",
+          "default": true
+        },
+        "adx": {
+          "type": "boolean",
+          "default": true
+        },
+        "sma": {
+          "type": "boolean",
+          "default": true
+        },
+        "ao": {
+          "type": "boolean",
+          "default": true
+        },
+        "aroon": {
+          "type": "boolean",
+          "default": true
+        },
+        "candlestick": {
+          "type": "boolean",
+          "default": true
+        },
+        "ichimoku": {
+          "type": "boolean",
+          "default": true
+        },
+        "sp500ai": {
+          "type": "boolean",
+          "default": true
+        },
+        "sp500ai_ha": {
+          "type": "boolean",
+          "default": true,
+          "description": "SP500 AI sub-component: Heikin Ashi"
+        },
+        "sp500ai_ssl": {
+          "type": "boolean",
+          "default": true,
+          "description": "SP500 AI sub-component: SSL Channel"
+        },
+        "sp500ai_cmo": {
+          "type": "boolean",
+          "default": true,
+          "description": "SP500 AI sub-component: Chande Momentum Oscillator"
+        },
+        "sp500ai_airsi": {
+          "type": "boolean",
+          "default": true,
+          "description": "SP500 AI sub-component: Dual AI RSI"
+        },
+        "sp500ai_tmo": {
+          "type": "boolean",
+          "default": true,
+          "description": "SP500 AI sub-component: True Momentum Oscillator"
+        },
+        "sp500ai_mf": {
+          "type": "boolean",
+          "default": true,
+          "description": "SP500 AI sub-component: AI Money Flow"
+        }
+      }
+    },
+    "refresh_interval_minutes": {
+      "type": "number",
+      "default": 5,
+      "description": "How often to refresh signals (minutes)"
+    },
+    "notification_on_signal": {
+      "type": "boolean",
+      "default": true,
+      "description": "Send notification when strong signal detected"
+    }
+  },
+  "required": [
+    "config_name"
+  ],
+  "rls": {
+    "create": {
+      "$or": [
+        {
+          "created_by_id": "{{user.id}}"
+        },
+        {
+          "user_condition": {
+            "role": "admin"
+          }
+        }
+      ]
+    },
+    "read": {
+      "$or": [
+        {
+          "created_by_id": "{{user.id}}"
+        },
+        {
+          "user_condition": {
+            "role": "admin"
+          }
+        }
+      ]
+    },
+    "update": {
+      "$or": [
+        {
+          "created_by_id": "{{user.id}}"
+        },
+        {
+          "user_condition": {
+            "role": "admin"
+          }
+        }
+      ]
+    },
+    "delete": {
+      "$or": [
+        {
+          "created_by_id": "{{user.id}}"
+        },
+        {
+          "user_condition": {
+            "role": "admin"
+          }
+        }
+      ]
+    }
+  }
+}
