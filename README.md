@@ -73,6 +73,16 @@ Each job waits for its previous run to finish before starting again — the trad
 
 **After editing anything in `src/`, run `npm run build`** or you'll keep seeing the old UI.
 
+### Optional: "is it alive?" phone alert (heartbeat)
+
+Set `HEARTBEAT_URL` in `.env` to a [healthchecks.io](https://healthchecks.io)
+ping URL (free tier: sign up → Add Check → period 15 min, grace 5 min → copy
+the ping URL). The server then POSTs one outbound ping every 5 minutes. If the
+pings ever stop — crash, hang, power cut — Healthchecks emails you, even though
+your dying server could not have said a word. Leave it empty and the server
+just logs `Heartbeat: disabled` at boot. The URL is included in `.env.example`
+and kept out of git, since anyone holding it could spoof "alive" pings.
+
 ---
 
 ## Password lock
