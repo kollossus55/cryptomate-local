@@ -48,7 +48,7 @@ const { Auth } = await import('./auth.js');
  * replace — usually because the server was still running and Windows refused
  * to overwrite them.
  */
-const BUILD = '2026-10-26.1 — sync secrets shim, CORS allowlist, crash handlers exit';
+const BUILD = '2026-10-27.1 — browser execution removed, worker is sole executor';
 
 const PORT = Number(process.env.PORT || 8788);
 const HOST = process.env.HOST || '127.0.0.1';

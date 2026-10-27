@@ -8,7 +8,7 @@ import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
-import { Sparkles, AlertTriangle, Shield, Zap, CheckCircle, Settings, TrendingUp, Target, AlertCircle, Clock, Server, Globe, Activity, PlayCircle, Calendar, Layers, Brain, Bot, UserCheck } from "lucide-react";
+import { Sparkles, AlertTriangle, Shield, Zap, CheckCircle, Settings, TrendingUp, Target, AlertCircle, Server, Activity, Brain, Bot, UserCheck } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
 import AutoTradingDebugPanel from "../components/trading/AutoTradingDebugPanel";
 import AdvancedRiskControls from "../components/trading/AdvancedRiskControls";
@@ -140,7 +140,10 @@ export default function AutoTrading() {
           { profit_percent: 10, sell_percent: 25 },
         ],
         assets_traded_today: savedSettings.assets_traded_today || [], // NEW: Initialize assets traded list
-        execution_mode: savedSettings.execution_mode || 'auto',
+        // LOCAL CHANGE (2026-10-27): 'browser' execution mode was removed.
+        // If legacy settings carry it (or any other unknown value), force
+        // 'auto' so the server worker is never skipped because of stale state.
+        execution_mode: ['auto', 'server'].includes(savedSettings.execution_mode) ? savedSettings.execution_mode : 'auto',
         max_open_positions: savedSettings.max_open_positions ?? 5,
         // Ensure boolean/number values have defaults if coming from null/undefined in savedSettings
         use_trailing_stop: savedSettings.use_trailing_stop ?? false,
@@ -407,48 +410,17 @@ export default function AutoTrading() {
         <div className="mb-6 bg-slate-800/50 p-4 rounded-xl border border-slate-700">
           <Label className="text-slate-300 mb-3 block flex items-center gap-2">
             <Zap className="w-4 h-4 text-yellow-400" />
-            Execution Mode
+            Execution
           </Label>
-          <div className="grid grid-cols-3 gap-3">
-            <button
-              onClick={() => setSettings({...settings, execution_mode: 'auto'})}
-              className={`p-3 rounded-lg border flex flex-col items-center gap-2 transition-all ${
-                settings.execution_mode === 'auto'
-                  ? 'bg-indigo-600/20 border-indigo-500 text-white'
-                  : 'bg-slate-800 border-slate-700 text-slate-400 hover:bg-slate-700'
-              }`}
-            >
-              <Sparkles className={`w-5 h-5 ${settings.execution_mode === 'auto' ? 'text-indigo-400' : ''}`} />
-              <span className="text-sm font-medium">Auto (Recommended)</span>
-            </button>
-            <button
-              onClick={() => setSettings({...settings, execution_mode: 'browser'})}
-              className={`p-3 rounded-lg border flex flex-col items-center gap-2 transition-all ${
-                settings.execution_mode === 'browser'
-                  ? 'bg-blue-600/20 border-blue-500 text-white'
-                  : 'bg-slate-800 border-slate-700 text-slate-400 hover:bg-slate-700'
-              }`}
-            >
-              <Globe className={`w-5 h-5 ${settings.execution_mode === 'browser' ? 'text-blue-400' : ''}`} />
-              <span className="text-sm font-medium">Browser Only</span>
-            </button>
-            <button
-              onClick={() => setSettings({...settings, execution_mode: 'server'})}
-              className={`p-3 rounded-lg border flex flex-col items-center gap-2 transition-all ${
-                settings.execution_mode === 'server'
-                  ? 'bg-purple-600/20 border-purple-500 text-white'
-                  : 'bg-slate-800 border-slate-700 text-slate-400 hover:bg-slate-700'
-              }`}
-            >
-              <Server className={`w-5 h-5 ${settings.execution_mode === 'server' ? 'text-purple-400' : ''}`} />
-              <span className="text-sm font-medium">Server Only</span>
-            </button>
+          <div className="p-3 rounded-lg border border-green-600/40 bg-green-600/10 flex items-center gap-3">
+            <Server className="w-5 h-5 text-green-400 flex-shrink-0" />
+            <div>
+              <p className="text-sm font-medium text-white">V5 Server Worker (fixed)</p>
+              <p className="text-xs text-slate-400 mt-0.5">
+                All trades execute in the local server process — every 5 minutes, with real Binance OHLCV data, whether this page is open or not, even logged out. Browser-side trading was removed on 2026-10-27: a background tab cannot manage stop-losses reliably and previously traded on synthetic prices.
+              </p>
+            </div>
           </div>
-          <p className="text-xs text-slate-400 mt-3">
-            {settings.execution_mode === 'auto' && "Server-side trading is the primary executor; the browser takes over only if the server is unavailable."}
-            {settings.execution_mode === 'browser' && "Forces trading to run in your browser tab only. Use only as a manual fallback — the server worker is paused."}
-            {settings.execution_mode === 'server' && "Forces server-side trading only. This is the recommended 24/7 mode (no browser required)."}
-          </p>
         </div>
 
         {settings.is_enabled && (
@@ -909,162 +881,6 @@ export default function AutoTrading() {
               )}
             </div>
 
-            {/* Partial Profit Taking */}
-            <div className="bg-slate-900/50 rounded-xl p-4 border border-slate-600">
-              <div className="flex items-center justify-between mb-4">
-                <div>
-                  <h4 className="text-white font-semibold flex items-center gap-2">
-                    <Target className="w-4 h-4 text-yellow-400" />
-                    Partial Profit Taking
-                  </h4>
-                  <p className="text-xs text-slate-400 mt-1">
-                    Automatically take profits at multiple levels
-                  </p>
-                </div>
-                <Switch
-                  checked={settings.use_partial_profits}
-                  onCheckedChange={(checked) => setSettings({...settings, use_partial_profits: checked})}
-                  className="data-[state=checked]:bg-yellow-500"
-                />
-              </div>
-              
-              {settings.use_partial_profits && (
-                <div className="space-y-3 pt-4 border-t border-slate-700">
-                  <p className="text-xs text-slate-400 mb-2">Profit Targets:</p>
-                  
-                  {(settings.partial_profit_targets || []).map((target, idx) => (
-                    <div key={idx} className="bg-slate-700 rounded-lg p-3">
-                      <div className="grid grid-cols-2 gap-3">
-                        <div>
-                          <Label className="text-slate-300 text-xs mb-1 block">
-                            At {target.profit_percent}% Profit
-                          </Label>
-                          <Input
-                            type="number"
-                            value={target.profit_percent}
-                            onChange={(e) => {
-                              const newTargets = [...(settings.partial_profit_targets || [])];
-                              newTargets[idx].profit_percent = parseFloat(e.target.value) || 0;
-                              setSettings({...settings, partial_profit_targets: newTargets});
-                            }}
-                            className="bg-slate-800 border-slate-600 text-white text-sm"
-                            min="1"
-                            step="0.5"
-                          />
-                        </div>
-                        <div>
-                          <Label className="text-slate-300 text-xs mb-1 block">
-                            Sell {target.sell_percent}%
-                          </Label>
-                          <Input
-                            type="number"
-                            value={target.sell_percent}
-                            onChange={(e) => {
-                              const newTargets = [...(settings.partial_profit_targets || [])];
-                              newTargets[idx].sell_percent = parseFloat(e.target.value) || 0;
-                              setSettings({...settings, partial_profit_targets: newTargets});
-                            }}
-                            className="bg-slate-800 border-slate-600 text-white text-sm"
-                            min="1"
-                            max="100"
-                          />
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-                  
-                  <p className="text-xs text-slate-500 mt-2">
-                    Example: At 5% profit, sell 50% of position. At 10% profit, sell 25% more.
-                  </p>
-                </div>
-              )}
-            </div>
-
-            {/* Dynamic Risk Management */}
-            <div className="bg-slate-900/50 rounded-xl p-4 border border-emerald-500/30">
-              <div className="flex items-center justify-between mb-4">
-                <div>
-                  <h4 className="text-emerald-100 font-semibold flex items-center gap-2">
-                    <Activity className="w-4 h-4 text-emerald-400" />
-                    Dynamic Risk Management
-                  </h4>
-                  <p className="text-xs text-emerald-400/60 mt-1">
-                    Auto-adjust position sizing based on market volatility
-                  </p>
-                </div>
-                <Switch
-                  checked={settings.use_dynamic_risk}
-                  onCheckedChange={(checked) => setSettings({...settings, use_dynamic_risk: checked})}
-                  className="data-[state=checked]:bg-emerald-500"
-                />
-              </div>
-              
-              {settings.use_dynamic_risk && (
-                <div className="space-y-4 pt-4 border-t border-emerald-500/20">
-                  <div>
-                    <Label className="text-emerald-200 mb-2 block">
-                      Volatility Lookback: <span className="text-emerald-400 font-bold">{settings.volatility_lookback_periods ?? 20} periods</span>
-                    </Label>
-                    <Slider
-                      value={[settings.volatility_lookback_periods ?? 20]}
-                      onValueChange={(value) => setSettings({...settings, volatility_lookback_periods: value[0]})}
-                      min={5}
-                      max={50}
-                      step={5}
-                      className="mb-2 [&>.relative>.bg-primary]:bg-emerald-500 [&>.block]:border-emerald-500"
-                    />
-                    <p className="text-xs text-emerald-400/60">Periods used to calculate volatility</p>
-                  </div>
-                  
-                  <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <Label className="text-emerald-200 mb-2 block">
-                        High Volatility: <span className="text-emerald-400 font-bold">{settings.high_volatility_threshold ?? 5}%</span>
-                      </Label>
-                      <Slider
-                        value={[settings.high_volatility_threshold ?? 5]}
-                        onValueChange={(value) => setSettings({...settings, high_volatility_threshold: value[0]})}
-                        min={2}
-                        max={10}
-                        step={0.5}
-                        className="mb-2 [&>.relative>.bg-primary]:bg-emerald-500 [&>.block]:border-emerald-500"
-                      />
-                      <p className="text-xs text-emerald-400/60">Threshold for high volatility</p>
-                    </div>
-                    <div>
-                      <Label className="text-emerald-200 mb-2 block">
-                        Extreme Volatility: <span className="text-emerald-400 font-bold">{settings.extreme_volatility_threshold ?? 10}%</span>
-                      </Label>
-                      <Slider
-                        value={[settings.extreme_volatility_threshold ?? 10]}
-                        onValueChange={(value) => setSettings({...settings, extreme_volatility_threshold: value[0]})}
-                        min={5}
-                        max={20}
-                        step={1}
-                        className="mb-2 [&>.relative>.bg-primary]:bg-emerald-500 [&>.block]:border-emerald-500"
-                      />
-                      <p className="text-xs text-emerald-400/60">Threshold for extreme conditions</p>
-                    </div>
-                  </div>
-
-                  <div>
-                    <Label className="text-emerald-200 mb-2 block">
-                      Position Reduction: <span className="text-emerald-400 font-bold">{settings.volatility_position_reduction ?? 50}%</span>
-                    </Label>
-                    <Slider
-                      value={[settings.volatility_position_reduction ?? 50]}
-                      onValueChange={(value) => setSettings({...settings, volatility_position_reduction: value[0]})}
-                      min={10}
-                      max={80}
-                      step={5}
-                      className="mb-2 [&>.relative>.bg-primary]:bg-emerald-500 [&>.block]:border-emerald-500"
-                    />
-                    <p className="text-xs text-emerald-400/60">Reduce position size by this % in high volatility</p>
-                  </div>
-                </div>
-              )}
-            </div>
-
             {/* Feature Summary */}
             <div className="bg-indigo-500/10 border border-indigo-500/30 rounded-lg p-4">
               <h4 className="text-sm font-semibold text-indigo-300 mb-3">🎯 Active Features Summary</h4>
@@ -1112,261 +928,16 @@ export default function AutoTrading() {
         {/* Advanced Risk Controls (ATR sizing, exposure, correlation, crash breaker, VWAP) */}
         <AdvancedRiskControls settings={settings} setSettings={setSettings} />
 
-        {/* DCA Strategy */}
-        <Card className="bg-slate-800 border-2 border-purple-500/50 mt-6 shadow-[0_0_15px_rgba(168,85,247,0.15)]">
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-purple-100">
-              <Layers className="w-5 h-5 text-purple-400" />
-              Dollar-Cost Averaging (DCA)
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-6">
-            <div className="bg-slate-900/50 rounded-xl p-4 border border-purple-500/30">
-              <div className="flex items-center justify-between mb-4">
-                <div>
-                  <h4 className="text-purple-100 font-semibold flex items-center gap-2">
-                    <Layers className="w-4 h-4 text-purple-400" />
-                    DCA on Dips
-                  </h4>
-                  <p className="text-xs text-purple-400/60 mt-1">
-                    Automatically add to positions when price drops
-                  </p>
-                </div>
-                <Switch
-                  checked={settings.dca_enabled}
-                  onCheckedChange={(checked) => setSettings({...settings, dca_enabled: checked})}
-                  className="data-[state=checked]:bg-purple-500"
-                />
-              </div>
-              
-              {settings.dca_enabled && (
-                <div className="space-y-4 pt-4 border-t border-purple-500/20">
-                  <div>
-                    <Label className="text-purple-200 mb-2 block">
-                      Dip Threshold: <span className="text-purple-400 font-bold">-{settings.dca_dip_threshold}%</span>
-                    </Label>
-                    <Slider
-                      value={[settings.dca_dip_threshold]}
-                      onValueChange={(value) => setSettings({...settings, dca_dip_threshold: value[0]})}
-                      min={1}
-                      max={20}
-                      step={0.5}
-                      className="mb-2 [&>.relative>.bg-primary]:bg-purple-500 [&>.block]:border-purple-500"
-                    />
-                    <p className="text-xs text-purple-400/60">Buy more when price drops by this amount</p>
-                  </div>
-
-                  <div>
-                    <Label className="text-purple-200 mb-2 block">
-                      Buy Multiplier: <span className="text-purple-400 font-bold">{settings.dca_multiplier}x</span>
-                    </Label>
-                    <Slider
-                      value={[settings.dca_multiplier]}
-                      onValueChange={(value) => setSettings({...settings, dca_multiplier: value[0]})}
-                      min={1}
-                      max={3}
-                      step={0.1}
-                      className="mb-2 [&>.relative>.bg-primary]:bg-purple-500 [&>.block]:border-purple-500"
-                    />
-                    <p className="text-xs text-purple-400/60">Multiply original trade size (e.g. 1.5x)</p>
-                  </div>
-
-                  <div>
-                    <Label className="text-purple-200 mb-2 block">
-                      Max DCA Buys: <span className="text-purple-400 font-bold">{settings.max_dca_buys}</span>
-                    </Label>
-                    <Slider
-                      value={[settings.max_dca_buys]}
-                      onValueChange={(value) => setSettings({...settings, max_dca_buys: value[0]})}
-                      min={1}
-                      max={10}
-                      step={1}
-                      className="mb-2 [&>.relative>.bg-primary]:bg-purple-500 [&>.block]:border-purple-500"
-                    />
-                    <p className="text-xs text-purple-400/60">Max times to add to a single position</p>
-                  </div>
-                </div>
-              )}
-            </div>
-          </CardContent>
-        </Card>
-
-        {/* Trading Schedule */}
-        <Card className="bg-slate-800 border-2 border-blue-500/50 mt-6 shadow-[0_0_15px_rgba(59,130,246,0.15)]">
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-blue-100">
-              <Calendar className="w-5 h-5 text-blue-400" />
-              Trading Schedule (Server-Side)
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-6">
-            <div className="bg-slate-900/50 rounded-xl p-4 border border-blue-500/30">
-              <div className="flex items-center justify-between mb-4">
-                <div>
-                  <h4 className="text-blue-100 font-semibold flex items-center gap-2">
-                    <Clock className="w-4 h-4 text-blue-400" />
-                    Active Hours & Days
-                  </h4>
-                  <p className="text-xs text-blue-400/60 mt-1">
-                    Limit trading to specific times (UTC)
-                  </p>
-                </div>
-                <Switch
-                  checked={settings.trading_schedule?.enabled}
-                  onCheckedChange={(checked) => setSettings({
-                    ...settings, 
-                    trading_schedule: { ...settings.trading_schedule, enabled: checked }
-                  })}
-                  className="data-[state=checked]:bg-blue-500"
-                />
-              </div>
-              
-              {settings.trading_schedule?.enabled && (
-                <div className="space-y-4 pt-4 border-t border-blue-500/20">
-                  <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <Label className="text-blue-200 mb-2 block">Start Hour (UTC)</Label>
-                      <Input
-                        type="number"
-                        min={0}
-                        max={23}
-                        value={settings.trading_schedule.start_hour}
-                        onChange={(e) => setSettings({
-                          ...settings,
-                          trading_schedule: { ...settings.trading_schedule, start_hour: parseInt(e.target.value) || 0 }
-                        })}
-                        className="bg-slate-800 border-blue-500/30 text-white"
-                      />
-                    </div>
-                    <div>
-                      <Label className="text-blue-200 mb-2 block">End Hour (UTC)</Label>
-                      <Input
-                        type="number"
-                        min={0}
-                        max={23}
-                        value={settings.trading_schedule.end_hour}
-                        onChange={(e) => setSettings({
-                          ...settings,
-                          trading_schedule: { ...settings.trading_schedule, end_hour: parseInt(e.target.value) || 0 }
-                        })}
-                        className="bg-slate-800 border-blue-500/30 text-white"
-                      />
-                    </div>
-                  </div>
-
-                  <div>
-                    <Label className="text-blue-200 mb-2 block">Active Days</Label>
-                    <div className="flex flex-wrap gap-2">
-                      {['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'].map(day => (
-                        <div key={day} className="flex items-center gap-2">
-                          <Checkbox
-                            checked={settings.trading_schedule.days.includes(day)}
-                            onCheckedChange={(checked) => {
-                              const currentDays = settings.trading_schedule.days;
-                              const newDays = checked 
-                                ? [...currentDays, day]
-                                : currentDays.filter(d => d !== day);
-                              setSettings({
-                                ...settings,
-                                trading_schedule: { ...settings.trading_schedule, days: newDays }
-                              });
-                            }}
-                            className="border-blue-500 data-[state=checked]:bg-blue-500"
-                          />
-                          <span className="text-sm uppercase text-slate-300">{day}</span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              )}
-            </div>
-          </CardContent>
-        </Card>
-
         {/* Smart Order Execution */}
         <Card className="bg-slate-800 border-2 border-cyan-500/50 mt-6 shadow-[0_0_15px_rgba(6,182,212,0.15)]">
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-cyan-100">
               <Zap className="w-5 h-5 text-cyan-400" />
-              Smart Order Execution
+              Execution Guardrails
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-6">
             
-            {/* Smart Order Routing */}
-            <div className="bg-slate-900/50 rounded-xl p-4 border border-cyan-500/30">
-              <div className="flex items-center justify-between mb-4">
-                <div>
-                  <h4 className="text-cyan-100 font-semibold flex items-center gap-2">
-                    <TrendingUp className="w-4 h-4 text-cyan-400" />
-                    Smart Order Routing
-                  </h4>
-                  <p className="text-xs text-cyan-400/60 mt-1">
-                    Automatically selects optimal execution strategy
-                  </p>
-                </div>
-                <Switch
-                  checked={settings.use_smart_routing}
-                  onCheckedChange={(checked) => setSettings({...settings, use_smart_routing: checked})}
-                  className="data-[state=checked]:bg-cyan-500"
-                />
-              </div>
-              
-              {settings.use_smart_routing && (
-                <div className="space-y-4 pt-4 border-t border-cyan-500/20">
-                  <div>
-                    <Label className="text-cyan-200 mb-2 block">
-                      Execution Strategy
-                    </Label>
-                    <select
-                      value={settings.execution_strategy || 'smart_limit'}
-                      onChange={(e) => setSettings({...settings, execution_strategy: e.target.value})}
-                      className="w-full bg-slate-900 border border-cyan-500/30 text-white rounded-lg px-3 py-2 text-sm focus:border-cyan-500 outline-none"
-                    >
-                      <option value="market">Market (Immediate, Higher Slippage)</option>
-                      <option value="limit">Limit (Better Price, May Not Fill)</option>
-                      <option value="smart_limit">Smart Limit (Recommended)</option>
-                      <option value="iceberg">Iceberg (Hide Order Size)</option>
-                    </select>
-                    <p className="text-xs text-cyan-400/60 mt-1">
-                      Smart limit dynamically adjusts based on market conditions
-                    </p>
-                  </div>
-
-                  <div>
-                    <Label className="text-cyan-200 mb-2 block">
-                      Limit Offset: <span className="text-cyan-400 font-bold">{settings.limit_offset_percent ?? 0.1}%</span>
-                    </Label>
-                    <Slider
-                      value={[settings.limit_offset_percent ?? 0.1]}
-                      onValueChange={(value) => setSettings({...settings, limit_offset_percent: value[0]})}
-                      min={0.05}
-                      max={1.0}
-                      step={0.05}
-                      className="mb-2 [&>.relative>.bg-primary]:bg-cyan-500 [&>.block]:border-cyan-500"
-                    />
-                    <p className="text-xs text-cyan-400/60">Distance from market price for limit orders</p>
-                  </div>
-
-                  <div>
-                    <Label className="text-cyan-200 mb-2 block">
-                      Order Timeout: <span className="text-cyan-400 font-bold">{settings.order_timeout_seconds ?? 30}s</span>
-                    </Label>
-                    <Slider
-                      value={[settings.order_timeout_seconds ?? 30]}
-                      onValueChange={(value) => setSettings({...settings, order_timeout_seconds: value[0]})}
-                      min={10}
-                      max={120}
-                      step={10}
-                      className="mb-2 [&>.relative>.bg-primary]:bg-cyan-500 [&>.block]:border-cyan-500"
-                    />
-                    <p className="text-xs text-cyan-400/60">Convert to market order after timeout</p>
-                  </div>
-                </div>
-              )}
-            </div>
-
             {/* Slippage Control */}
             <div className="bg-slate-900/50 rounded-xl p-4 border border-slate-600">
               <div className="mb-4">
@@ -1394,154 +965,9 @@ export default function AutoTrading() {
                   />
                   <p className="text-xs text-slate-400">Orders exceeding this will be cancelled</p>
                 </div>
-
-                <div className="flex items-center justify-between">
-                  <div>
-                    <Label className="text-slate-300 text-sm">Dynamic Slippage Adjustment</Label>
-                    <p className="text-xs text-slate-500 mt-0.5">
-                      Increase limits during high volatility
-                    </p>
-                  </div>
-                  <Switch
-                    checked={settings.use_dynamic_slippage}
-                    onCheckedChange={(checked) => setSettings({...settings, use_dynamic_slippage: checked})}
-                    className="data-[state=checked]:bg-orange-500"
-                  />
-                </div>
               </div>
             </div>
 
-            {/* TWAP Execution */}
-            <div className="bg-slate-900/50 rounded-xl p-4 border border-slate-600">
-              <div className="flex items-center justify-between mb-4">
-                <div>
-                  <h4 className="text-white font-semibold flex items-center gap-2">
-                    <Clock className="w-4 h-4 text-cyan-400" />
-                    TWAP (Time-Weighted Average Price)
-                  </h4>
-                  <p className="text-xs text-slate-400 mt-1">
-                    Split large trades over time to minimize market impact
-                  </p>
-                </div>
-                <Switch
-                  checked={settings.use_twap}
-                  onCheckedChange={(checked) => setSettings({...settings, use_twap: checked})}
-                  className="data-[state=checked]:bg-cyan-500"
-                />
-              </div>
-              
-              {settings.use_twap && (
-                <div className="space-y-4 pt-4 border-t border-slate-700">
-                  <div>
-                    <Label className="text-slate-300 mb-2 block">
-                      Trigger Threshold: {settings.twap_threshold_percent ?? 5}% of Portfolio
-                    </Label>
-                    <Slider
-                      value={[settings.twap_threshold_percent ?? 5]}
-                      onValueChange={(value) => setSettings({...settings, twap_threshold_percent: value[0]})}
-                      min={1}
-                      max={20}
-                      step={1}
-                      className="mb-2"
-                    />
-                    <p className="text-xs text-slate-400">Use TWAP for trades larger than this</p>
-                  </div>
-                  
-                  <div>
-                    <Label className="text-slate-300 mb-2 block">
-                      Duration: {settings.twap_duration_minutes ?? 15} minutes
-                    </Label>
-                    <Slider
-                      value={[settings.twap_duration_minutes ?? 15]}
-                      onValueChange={(value) => setSettings({...settings, twap_duration_minutes: value[0]})}
-                      min={5}
-                      max={60}
-                      step={5}
-                      className="mb-2"
-                    />
-                    <p className="text-xs text-slate-400">Time to execute all TWAP orders</p>
-                  </div>
-
-                  <div>
-                    <Label className="text-slate-300 mb-2 block">
-                      Number of Orders: {settings.twap_num_orders ?? 5}
-                    </Label>
-                    <Slider
-                      value={[settings.twap_num_orders ?? 5]}
-                      onValueChange={(value) => setSettings({...settings, twap_num_orders: value[0]})}
-                      min={3}
-                      max={20}
-                      step={1}
-                      className="mb-2"
-                    />
-                    <p className="text-xs text-slate-400">Split trade into this many orders</p>
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* Execution Summary */}
-            <div className="bg-gradient-to-r from-indigo-500/10 to-cyan-500/10 border border-indigo-500/30 rounded-lg p-4">
-              <h4 className="text-sm font-semibold text-indigo-300 mb-3">🎯 Smart Execution Summary</h4>
-              <div className="space-y-2 text-xs">
-                {settings.use_smart_routing && (
-                  <div className="flex items-center gap-2 text-indigo-400">
-                    <CheckCircle className="w-4 h-4" />
-                    <span>Smart routing: {settings.execution_strategy || 'smart_limit'} strategy with {settings.max_slippage_percent ?? 0.5}% max slippage</span>
-                  </div>
-                )}
-                {settings.use_twap && (
-                  <div className="flex items-center gap-2 text-cyan-400">
-                    <CheckCircle className="w-4 h-4" />
-                    <span>TWAP: Splits trades {'>'} {settings.twap_threshold_percent ?? 5}% into {settings.twap_num_orders ?? 5} orders over {settings.twap_duration_minutes ?? 15}min</span>
-                  </div>
-                )}
-                {settings.use_dynamic_slippage && (
-                  <div className="flex items-center gap-2 text-orange-400">
-                    <CheckCircle className="w-4 h-4" />
-                    <span>Dynamic slippage: Adjusts limits based on market volatility</span>
-                  </div>
-                )}
-                {!settings.use_smart_routing && !settings.use_twap && !settings.use_dynamic_slippage && (
-                  <p className="text-slate-400">No smart execution features enabled. Orders will use standard market execution.</p>
-                )}
-              </div>
-            </div>
-
-          </CardContent>
-        </Card>
-
-        {/* Best Practices */}
-        <Card className="bg-slate-900 border-slate-700 mt-6">
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-white">
-              <CheckCircle className="w-5 h-5 text-blue-400" />
-              Best Practices
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <ul className="space-y-3 text-slate-300">
-              <li className="flex items-start gap-2">
-                <span className="text-indigo-400 mt-1">•</span>
-                <span>Start with conservative settings (low risk, high confidence threshold)</span>
-              </li>
-              <li className="flex items-start gap-2">
-                <span className="text-indigo-400 mt-1">•</span>
-                <span>Monitor performance daily and adjust settings based on results</span>
-              </li>
-              <li className="flex items-start gap-2">
-                <span className="text-indigo-400 mt-1">•</span>
-                <span>Use the circuit breaker to protect against unexpected market volatility</span>
-              </li>
-              <li className="flex items-start gap-2">
-                <span className="text-indigo-400 mt-1">•</span>
-                <span>Keep position sizes small (5-10% of portfolio) for diversification</span>
-              </li>
-              <li className="flex items-start gap-2">
-                <span className="text-indigo-400 mt-1">•</span>
-                <span>Test with paper trading before using real funds</span>
-              </li>
-            </ul>
           </CardContent>
         </Card>
 
@@ -1566,11 +992,7 @@ export default function AutoTrading() {
             </div>
             <p className="text-slate-400 mb-6">
               Monitor your auto-trading activity in real-time. The server worker runs on schedule regardless of this page.
-              {settings.execution_mode === 'browser' && (
-                <span className="text-yellow-400 ml-1">
-                  Note: Browser-only mode requires you to keep the <strong>Trading Dashboard</strong> open for trades to execute.
-                </span>
-              )}
+              {/* LOCAL CHANGE (2026-10-27): dead 'browser mode requires this page open' note removed with browser execution. */}
             </p>
             
             <AutoTradingDebugPanel
@@ -1579,7 +1001,6 @@ export default function AutoTrading() {
               assets={[]} 
               assetConfidence={{}} 
               isEnabled={settings.is_enabled}
-              onManualCheck={null}
               isSettingsPage={true}
             />
           </div>
@@ -1588,3 +1009,4 @@ export default function AutoTrading() {
     </div>
   );
 }
+

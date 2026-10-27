@@ -290,6 +290,12 @@ export default function AdvancedRiskControls({ settings, setSettings }) {
           </div>
         </CardContent>
       </Card>
+
+      {/* LOCAL CHANGE (2026-10-27): the VWAP execution section was removed. It
+          was decorative — the paper worker never reads use_vwap or the VWAP
+          sliders — so a toggled-on switch implied an execution behavior that
+          did not exist. vwap_* fields persist in settings for schema
+          compatibility but are inert. */}
     </>
   );
 }

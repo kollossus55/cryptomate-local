@@ -139,9 +139,8 @@ export default function SystemHealthMonitor({
               </div>
               <div className="bg-slate-800/50 p-2 rounded-lg">
                 <p className="text-[10px] text-slate-500 mb-1">Execution Mode</p>
-                <p className="text-sm font-bold text-white">
-                  {autoTradingSettings?.execution_mode === 'browser' ? 'Browser' : 'Hybrid/Server'}
-                </p>
+                {/* LOCAL CHANGE (2026-10-27): browser mode removed — this is always the V5 server worker. */}
+                <p className="text-sm font-bold text-white">Server Worker</p>
               </div>
               <div className="bg-slate-800/50 p-2 rounded-lg">
                 <p className="text-[10px] text-slate-500 mb-1">Confidence Threshold</p>

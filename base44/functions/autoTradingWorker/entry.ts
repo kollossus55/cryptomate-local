@@ -98,7 +98,12 @@ Deno.serve(async (req) => {
     if (settings.created_by !== user_email) {
       return Response.json({ success: false, error: 'Forbidden: settings owner mismatch' }, { status: 403 });
     }
-    if (!settings.is_enabled || settings.execution_mode === 'browser') {
+    // LOCAL FIX (2026-10-27): dropped the execution_mode === 'browser' check.
+    // Browser-side trading was removed from the app entirely — 'browser' can
+    // only appear as a stale value in settings, and skipping the worker on a
+    // stale value silently disabled all trading. Every enabled user is now
+    // processed by the V5 worker regardless of execution_mode.
+    if (!settings.is_enabled) {
       return Response.json({ success: true, skipped: true, reason: 'server_trading_not_enabled' });
     }
 

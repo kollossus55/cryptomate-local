@@ -7,13 +7,12 @@ import { ChevronDown, ChevronUp, Bug, Activity, AlertCircle, CheckCircle2, XCirc
 import { motion, AnimatePresence } from "framer-motion";
 import { useQueryClient } from "@tanstack/react-query";
 
-export default function AutoTradingDebugPanel({ 
-  autoTradingSettings, 
-  portfolio, 
-  assets, 
+export default function AutoTradingDebugPanel({
+  autoTradingSettings,
+  portfolio,
+  assets,
   assetConfidence,
   isEnabled,
-  onManualCheck,
   isSettingsPage = false
 }) {
   const [isExpanded, setIsExpanded] = useState(true);
@@ -58,48 +57,38 @@ export default function AutoTradingDebugPanel({
   }, [portfolio?.total_balance, portfolio?.available_balance, portfolio?.positions?.length]);
 
   // Trigger manual auto-trade cycle
+  // LOCAL CHANGE: browser-side execution removed — this now always triggers
+  // one server-worker cycle. (The old 'browser mode' branch ran the legacy
+  // client engine in the tab; all execution is server-side.)
   const handleRunAutoTrade = async () => {
     setIsRunning(true);
     const timestamp = new Date().toLocaleTimeString();
-    const isBrowserMode = autoTradingSettings?.execution_mode === 'browser';
-    
+
     setLogs(prev => [{
       id: Date.now(),
       timestamp,
-      message: isBrowserMode ? '🚀 Running browser-side analysis...' : '🚀 Triggering server-side cycle...',
+      message: '🚀 Triggering server-side cycle...',
       type: 'info'
     }, ...prev].slice(0, 50));
 
     try {
-      if (isBrowserMode && onManualCheck) {
-        // Run browser check
-        await onManualCheck();
-        const successTimestamp = new Date().toLocaleTimeString();
-        setLogs(prev => [{
-          id: Date.now() + 1,
-          timestamp: successTimestamp,
-          message: `✅ Browser analysis complete`,
-          type: 'success'
-        }, ...prev].slice(0, 50));
-      } else {
-        // Run server check
-        const { base44 } = await import('@/api/base44Client');
-        const result = await base44.functions.invoke('tradingScheduler');
-        
-        // Refresh data
-        await Promise.all([
-          queryClient.invalidateQueries({ queryKey: ['portfolio'] }),
-          queryClient.invalidateQueries({ queryKey: ['auto-trading-settings'] })
-        ]);
-        
-        const successTimestamp = new Date().toLocaleTimeString();
-        setLogs(prev => [{
-          id: Date.now() + 1,
-          timestamp: successTimestamp,
-          message: `✅ Server cycle complete: ${result.data?.summary?.trades_executed || 0} trades`,
-          type: 'success'
-        }, ...prev].slice(0, 50));
-      }
+      // Run server check
+      const { base44 } = await import('@/api/base44Client');
+      const result = await base44.functions.invoke('tradingScheduler');
+
+      // Refresh data
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['portfolio'] }),
+        queryClient.invalidateQueries({ queryKey: ['auto-trading-settings'] })
+      ]);
+
+      const successTimestamp = new Date().toLocaleTimeString();
+      setLogs(prev => [{
+        id: Date.now() + 1,
+        timestamp: successTimestamp,
+        message: `✅ Server cycle complete: ${result.data?.summary?.trades_executed || 0} trades`,
+        type: 'success'
+      }, ...prev].slice(0, 50));
     } catch (error) {
       console.error('Failed to run auto-trade:', error);
       const errorTimestamp = new Date().toLocaleTimeString();

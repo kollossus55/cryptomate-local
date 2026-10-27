@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect } from "react";
 import { base44 } from "@/api/base44Client";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
@@ -21,7 +21,8 @@ import NotificationToast from "../components/notifications/NotificationToast";
 import { useNotificationMonitor } from "../components/notifications/useNotificationMonitor";
 import { generateAdvancedSignal } from "../components/trading/AdvancedSignalGenerator";
 import AutoTradingDebugPanel from "../components/trading/AutoTradingDebugPanel";
-import BackendMigrationGuide from "../components/trading/BackendMigrationGuide";
+// LOCAL CHANGE (2026-10-27): BackendMigrationGuide banner removed — the
+// platform-to-local-backend migration is complete and the banner was noise.
 import NewsWidget from "../components/trading/NewsWidget";
 import SystemHealthMonitor from "../components/trading/SystemHealthMonitor";
 import AITradingAdvisor from "../components/trading/AITradingAdvisor";
@@ -29,13 +30,12 @@ import SignalAlertSettings from "../components/trading/SignalAlertSettings";
 import BackendResultPanel from "../components/trading/BackendResultPanel";
 import ConfluenceSignalScanner from "../components/trading/ConfluenceSignalScanner";
 
-import {
-  executeAutoTradingCheckAdvanced,
-  formatOpportunityLog,
-  BrowserState
-} from "../components/trading/autoTradingEngine";
-
-import { executeSmartOrder } from "../components/trading/smartOrderExecution";
+// LOCAL CHANGE (2026-10-27): browser-side auto-trading removed. The browser
+// engine (autoTradingEngine.jsx / smartOrderExecution.jsx) executed trades
+// from the UI tab — historically on synthetic altcoin prices — raced the V5
+// server worker for the same portfolio, and depended on the tab staying
+// open + unthrottled. All execution is server-side now; this page is a
+// dashboard and manual-trade surface only.
 import { scanAltcoins } from "../components/trading/AltcoinScanner";
 import { useOkxWebSocket } from "../components/trading/useOkxWebSocket";
 
@@ -461,11 +461,7 @@ export default function Trading() {
         setShowVisibilityWarning(true);
         console.log('ℹ️ Page hidden - auto-trading continuing via background worker');
       } else if (visible && autoTradingSettings?.is_enabled) {
-        console.log('✅ Page visible - auto-trading resumed');
-        const savedState = BrowserState.load();
-        if (savedState) {
-          console.log('📥 Restored auto-trading state from storage');
-        }
+        console.log('✅ Page visible - auto-trading resumed (server worker)');
       }
     };
 
@@ -485,11 +481,6 @@ export default function Trading() {
     const timeInterval = setInterval(() => {
       setCurrentTime(new Date());
     }, 1000);
-
-    const savedState = BrowserState.load();
-    if (savedState && autoTradingSettings?.is_enabled) {
-      console.log('📥 Auto-trading state restored from previous session');
-    }
 
     // NOTE: The background altcoin scanner was removed. An earlier version
     // generated fake prices and injected them into the trading pool and
@@ -769,475 +760,68 @@ export default function Trading() {
   };
 
   // Check if backend functions are available
+  // LOCAL CHANGE (2026-10-27): the browser used to invoke tradingScheduler
+  // every 2 minutes on top of the server's own 5-minute tick — an execution
+  // accelerator that only existed while a tab was open, and one more way a
+  // stale tab could influence trading. Removed. The page now POLLs the
+  // authenticated /api/health every 60s and mirrors the server scheduler's
+  // real state into the activity log. Read-only: the browser can no longer
+  // start, stop, or accelerate trading at all.
   const [hasBackendFunctions, setHasBackendFunctions] = useState(false);
   const [lastBackendRun, setLastBackendRun] = useState(null);
   const [backendDebugLog, setBackendDebugLog] = useState(null);
   const [isRunningManualTrade, setIsRunningManualTrade] = useState(false);
 
-  // Build a human-readable activity-log message from the scheduler response.
-  // Used by both the automatic 2-minute poller and the manual "Run Trade Check
-  // Now" button so the Live Activity Log reflects real server-side work.
-  const formatSchedulerActivity = (data, settingsId) => {
-    const myDetails = data?.userDetails?.find(d => d.settings_id === settingsId);
-    if (myDetails) {
-      if (myDetails.error) return `ERROR: ${myDetails.error}`;
-      if (myDetails.halted) return `HALTED: ${myDetails.reason || 'Risk guard triggered'}`;
-      if (myDetails.skipped) return `SKIPPED: ${myDetails.reason || 'Conditions not met'}`;
-      if (myDetails.trades_executed > 0) {
-        const tradeSummary = (myDetails.trade_actions || [])
-          .map(t => `${(t.action || '').toUpperCase()} ${t.asset_symbol}`)
-          .join(', ');
-        return `EXECUTED: ${myDetails.trades_executed} trade(s)${tradeSummary ? ' — ' + tradeSummary : ''}`;
-      }
-      return `Scanned ${myDetails.scanned} assets — No signals met criteria`;
-    }
-    const s = data?.summary;
-    if (!s) return null;
-    if (s.trades_executed > 0) return `EXECUTED: ${s.trades_executed} trade(s) across ${s.users_processed} user(s)`;
-    if (s.errors > 0) return `WARNING: ${s.errors} error(s) processing ${s.users_processed} user(s)`;
-    return `Server worker: Scanned ${s.users_processed} user(s) — No signals met criteria`;
-  };
-
   useEffect(() => {
-    // Check if backend functions are available and TRIGGER them periodically
-    const runBackendTrading = async () => {
+    const syncDashboard = async () => {
       try {
-        console.log('🚀 Triggering server-side trading scheduler...');
-        const result = await base44.functions.invoke('tradingScheduler', {});
+        const res = await fetch('/api/health', { credentials: 'same-origin' });
+        // 200 either way (the endpoint is liveness-first), but the
+        // authenticated response carries the full scheduler detail.
+        setHasBackendFunctions(res.ok);
+        if (!res.ok) return;
+        const health = await res.json();
+        const sched = health?.scheduler;
+        if (!sched?.lastRun) return;
 
-        if (result.data?.success) {
-          setHasBackendFunctions(true);
-          setLastBackendRun(new Date());
-          setBackendDebugLog(result.data);
-          console.log('✅ Backend trading completed:', result.data.summary);
+        setLastBackendRun(sched.lastRun.tradingScheduler?.at ? new Date(sched.lastRun.tradingScheduler.at) : null);
+        setBackendDebugLog(sched.lastRun.tradingScheduler ?? null);
 
-          // Refresh portfolio data if trades were executed
-          if (result.data.summary?.trades_executed > 0) {
-            queryClient.invalidateQueries({ queryKey: ['portfolio'] });
-            queryClient.invalidateQueries({ queryKey: ['trades'] });
-          }
-
-          // Feed server-side worker activity into the Live Activity Log so
-          // SystemHealthMonitor shows what the V5 worker actually did. The
-          // browser-side loop early-returns in server/auto mode, so without
-          // this the log stays empty forever in the default execution mode.
-          const activityMsg = formatSchedulerActivity(result.data, autoTradingSettings?.id);
-          if (activityMsg) {
-            setLastScanTime(Date.now());
-            setLastScanResult(activityMsg);
-          }
-        } else {
-          setBackendDebugLog(result.data);
+        const run = sched.lastRun.tradingScheduler;
+        if (!run) return;
+        setLastScanTime(Date.now());
+        if (run.ok === false && run.error) {
+          setLastScanResult(`ERROR: ${run.error}`);
+          return;
         }
-      } catch (error) {
-        console.warn('⚠️ Backend trading not available:', error.message);
-        setHasBackendFunctions(false);
-      }
-    };
-
-    // Only run if auto-trading is enabled AND not forced to browser mode
-    if (autoTradingSettings?.is_enabled && autoTradingSettings?.execution_mode !== 'browser') {
-      // Initial run after 5 seconds
-      const initialRun = setTimeout(runBackendTrading, 5000);
-
-      // Run every 2 minutes
-      const backendInterval = setInterval(runBackendTrading, 2 * 60 * 1000);
-
-      return () => {
-        clearTimeout(initialRun);
-        clearInterval(backendInterval);
-      };
-    }
-  }, [autoTradingSettings?.is_enabled, autoTradingSettings?.execution_mode]);
-
-  // Ref to hold latest data for auto-trading interval
-  const latestDataRef = useRef({
-    autoTradingSettings,
-    portfolio,
-    assets,
-    assetConfidence,
-    hasBackendFunctions
-  });
-
-  useEffect(() => {
-    latestDataRef.current = {
-      autoTradingSettings,
-      portfolio,
-      assets,
-      assetConfidence,
-      hasBackendFunctions
-    };
-  }, [autoTradingSettings, portfolio, assets, assetConfidence, hasBackendFunctions]);
-
-  useEffect(() => {
-    // This effect only starts the interval if enabled. 
-    // Inside the interval, we read from latestDataRef to get fresh data without resetting the interval.
-    
-    if (!autoTradingSettings?.is_enabled) {
-      return;
-    }
-    
-    const checkAutoTrading = async () => {
-      // Use fresh data from ref
-      const { 
-        autoTradingSettings, 
-        portfolio, 
-        assets, 
-        assetConfidence, 
-        hasBackendFunctions 
-      } = latestDataRef.current;
-
-      if (!autoTradingSettings?.is_enabled || !portfolio || !assets || assets.length === 0) {
-        console.log('⚠️ Auto-trading check skipped: Missing requirements');
-        return;
-      }
-
-      if (Object.keys(assetConfidence).length === 0) {
-        console.log('⏳ Auto-trading check delayed: Waiting for AI confidence data...');
-        return;
-      }
-      
-      // Determine if we should run browser-side trading
-      const executionMode = autoTradingSettings.execution_mode || 'auto';
-      
-      // Defer ALL trade execution to the V5 server worker unless the user
-      // explicitly chose browser-only mode. The browser loop previously
-      // traded on synthetic (non-real) altcoin prices. The server worker
-      // fetches real Binance OHLCV.
-      if (executionMode !== 'browser') {
-        console.log('✅ Server-side auto-trading active (V5 worker) - browser provides monitoring only');
-        return;
-      }
-
-      // If execution mode is 'server' but backend is not available, warn user
-      if (executionMode === 'server' && !hasBackendFunctions) {
-        console.warn('⚠️ Server-only mode selected but backend functions unavailable. Auto-trading paused.');
-        return;
-      }
-
-      console.log(`\n═══════════════════════════════════════════════════`);
-      console.log(`🤖 AUTO-TRADING CHECK STARTED (${executionMode === 'browser' ? 'Forced Browser Mode' : 'Auto Mode'})`);
-      console.log('═══════════════════════════════════════════════════');
-      
-      BrowserState.save({
-        lastCheck: Date.now(),
-        isEnabled: true,
-        tradesToday: autoTradingSettings.trades_today || 0
-      });
-
-      console.log('📊 Confidence data:', Object.keys(assetConfidence).length, 'assets ready');
-      console.log('💰 Available balance:', portfolio?.available_balance);
-      console.log('📈 Trades today:', autoTradingSettings.trades_today, '/', autoTradingSettings.max_trades_per_day);
-      console.log('⚙️ Min confidence:', autoTradingSettings.min_confidence + '%');
-      
-      // Combine main assets with altcoin opportunities
-      const combinedAssets = [...assets];
-      if (window.altcoinOpportunities && window.altcoinOpportunities.length > 0) {
-        window.altcoinOpportunities.forEach(opp => {
-          // Only add if not already in main assets list
-          if (!combinedAssets.find(a => a.symbol === opp.symbol)) {
-            combinedAssets.push({
-              symbol: opp.symbol,
-              name: opp.name,
-              price: opp.price,
-              change24h: opp.momentum,
-              volume24h: opp.marketCap * 0.1, // Estimated volume
-              marketCap: opp.marketCap,
-              icon: opp.symbol.substring(0, 2),
-              color: "bg-cyan-500"
-            });
+        const summary = run.result?.summary;
+        const mine = run.result?.userDetails?.find?.((d) => d.settings_id === autoTradingSettings?.id);
+        if (mine) {
+          if (mine.error) { setLastScanResult(`ERROR: ${mine.error}`); return; }
+          if (mine.halted) { setLastScanResult(`HALTED: ${mine.reason || 'Risk guard triggered'}`); return; }
+          if (mine.skipped) { setLastScanResult(`SKIPPED: ${mine.reason || 'Conditions not met'}`); return; }
+          if (mine.trades_executed > 0) {
+            const actions = (mine.trade_actions || []).map(t => `${(t.action || '').toUpperCase()} ${t.asset_symbol}`).join(', ');
+            setLastScanResult(`EXECUTED: ${mine.trades_executed} trade(s)${actions ? ' — ' + actions : ''}`);
+            return;
           }
-        });
-        console.log(`📈 Added ${window.altcoinOpportunities.length} altcoin opportunities to trading pool`);
-      }
-
-      // Combine confidence data
-      const combinedConfidence = { ...assetConfidence };
-      if (window.altcoinOpportunities) {
-        window.altcoinOpportunities.forEach(opp => {
-          combinedConfidence[opp.symbol] = opp.confidence;
-        });
-      }
-
-      console.log('🔍 Scanning for opportunities...\n');
-      
-      try {
-        const result = await executeAutoTradingCheckAdvanced(
-          combinedAssets,
-          combinedConfidence,
-          autoTradingSettings,
-          portfolio,
-          async (opportunity) => {
-            console.log(`🎯 Opportunity identified: ${formatOpportunityLog(opportunity)}`);
-
-            if (autoTradingSettings.use_smart_routing) {
-              console.log('🧠 Using smart order execution...');
-
-              const smartExecutionResult = await executeSmartOrder(
-                opportunity,
-                autoTradingSettings,
-                portfolio,
-                async (enhancedOpportunity) => {
-                  const { executionPrice, actualSlippage, executionStrategy } = enhancedOpportunity;
-
-                  console.log(`💰 Executing via ${executionStrategy?.toUpperCase()} strategy`);
-                  if (executionPrice) {
-                    console.log(`   Price: $${executionPrice.toFixed(2)} (slippage: ${actualSlippage?.toFixed(3)}%)`);
-                  }
-
-                  await handleAutoTrade(
-                    opportunity.asset,
-                    opportunity.action === 'partial_sell' ? 'sell' : enhancedOpportunity.action,
-                    enhancedOpportunity.quantity || opportunity.quantity,
-                    opportunity.confidence,
-                    opportunity.riskLevel
-                  );
-
-                  return {
-                    success: true,
-                    executionPrice,
-                    actualSlippage,
-                    strategy: executionStrategy
-                  };
-                }
-              );
-
-              if (smartExecutionResult.execution_type === 'twap') {
-                console.log(`📅 TWAP execution: ${smartExecutionResult.orders_completed}/${smartExecutionResult.twap_schedule.totalOrders} orders completed`);
-              }
-
-              return smartExecutionResult;
-            } else {
-              console.log(`🚀 Executing: ${formatOpportunityLog(opportunity)}`);
-              await handleAutoTrade(
-                opportunity.asset,
-                opportunity.action === 'partial_sell' ? 'sell' : opportunity.action,
-                opportunity.quantity,
-                opportunity.confidence,
-                opportunity.riskLevel
-              );
-              return { success: true, executionStrategy: 'standard' };
-            }
-          },
-          async (update) => {
-            console.log(`📊 Position update: ${update.asset.symbol} - ${update.reason}`);
-
-            if (portfolio?.id) {
-              const updatedPositions = portfolio.positions ? portfolio.positions.map(pos => ({ ...pos })) : [];
-              const assetSymbol = `${update.asset.symbol}/USDT`;
-              const positionIndex = updatedPositions.findIndex(
-                p => p.asset_symbol === assetSymbol
-              );
-
-              if (positionIndex >= 0) {
-                const position = updatedPositions[positionIndex];
-
-                if (update.action === 'update_trailing' && update.details) {
-                  position.highest_price = update.details.highestPrice;
-                  position.trailing_stop_price = update.details.trailingStopPrice;
-                }
-
-                if (update.action === 'update_breakeven' && update.details) {
-                  position.breakeven_activated = true;
-                }
-
-                await updatePortfolioMutation.mutateAsync({
-                  id: portfolio.id,
-                  data: {
-                    ...portfolio,
-                    positions: updatedPositions
-                  }
-                });
-              }
-            }
-          }
-        );
-
-        console.log('\n📋 RESULT:', result.reason);
-        
-        if (result.executed) {
-          console.log('✅ ✅ ✅ TRADE EXECUTED!');
-          console.log('Asset:', result.opportunity.asset.symbol);
-          console.log('Action:', result.opportunity.action);
-          console.log('Quantity:', result.opportunity.quantity);
-          if (result.executionDetails) {
-            console.log('Details:', result.executionDetails);
-          }
-        } else if (result.positionUpdates && result.positionUpdates.length > 0) {
-          console.log(`📊 Updated ${result.positionUpdates.length} position(s)`);
-        } else {
-          console.log('ℹ️ Reason:', result.reason);
-          if (result.circuitBreakerStatus) {
-            console.log('🛡️ Circuit breaker:', result.circuitBreakerStatus);
-          }
-          }
-
-          // Update System Health Monitor
-          setLastScanTime(Date.now());
-          if (result.executed) {
-          setLastScanResult(`EXECUTED: ${result.opportunity.action.toUpperCase()} ${result.opportunity.asset.symbol}`);
-          } else if (result.reason) {
-          // Make the reason more user friendly
-          const friendlyReasons = {
-             'no_opportunities': `Scanned ${combinedAssets.length} assets - No signals met criteria`,
-             'no_valid_opportunity': 'Signals found but filtered by risk/rules',
-             'circuit_breaker_triggered': 'Circuit Breaker Active - Trading Halted',
-             'confidence_not_ready': 'Waiting for signal data...'
-          };
-          setLastScanResult(friendlyReasons[result.reason] || result.reason);
-          }
-          if (result.marketCondition) {
-          setCurrentMarketCondition(result.marketCondition);
-          }
-
-          console.log('═══════════════════════════════════════════════════\n');
-          } catch (error) {
-        console.error('❌ Auto-trading check failed:', error);
-      }
-    };
-
-    console.log('⏱️ Setting up auto-trading background worker (45 seconds)');
-    // Run immediately once
-    checkAutoTrading();
-    
-    // Use a Web Worker for reliable timing in background
-    const workerScript = `
-      self.onmessage = function(e) {
-        if (e.data === 'start') {
-          // Clear any existing interval
-          if (self.timer) clearInterval(self.timer);
-          self.timer = setInterval(() => {
-            self.postMessage('tick');
-          }, 45000);
-        } else if (e.data === 'stop') {
-          if (self.timer) clearInterval(self.timer);
+          setLastScanResult(`Scanned ${mine.scanned} assets — No signals met criteria`);
+        } else if (summary) {
+          setLastScanResult(summary.trades_executed > 0
+            ? `EXECUTED: ${summary.trades_executed} trade(s) across ${summary.users_processed} user(s)`
+            : `Server worker: Scanned ${summary.users_processed} user(s) — No signals met criteria`);
         }
-      };
-    `;
-    
-    const blob = new Blob([workerScript], { type: 'application/javascript' });
-    const worker = new Worker(URL.createObjectURL(blob));
-    
-    worker.onmessage = (e) => {
-      if (e.data === 'tick') {
-        checkAutoTrading();
+      } catch {
+        // Health endpoint unreachable — next tick retries. Never an error
+        // dialog for a dashboard refresh.
       }
     };
-    
-    worker.postMessage('start');
 
-    return () => {
-      console.log('🛑 Stopping auto-trading monitor');
-      worker.postMessage('stop');
-      worker.terminate();
-    };
-  }, [autoTradingSettings?.is_enabled]); // Only restart if enabled state changes
+    syncDashboard();
+    const id = setInterval(syncDashboard, 60_000);
+    return () => clearInterval(id);
+  }, [autoTradingSettings?.id]);
 
-  // Extracted auto-trading logic for manual triggering
-  const runBrowserAutoTrading = async () => {
-    if (!autoTradingSettings?.is_enabled || !portfolio || !assets || assets.length === 0) {
-      console.log('⚠️ Manual check skipped: Missing requirements');
-      return;
-    }
-    
-    console.log('🎬 Manually triggering browser auto-trading check...');
-    
-    console.log('\n═══════════════════════════════════════════════════');
-    console.log('🤖 BROWSER AUTO-TRADING CHECK STARTED (MANUAL)');
-    console.log('═══════════════════════════════════════════════════');
-    
-    // Combine assets and confidence (logic duplicated from useEffect for now, ideal to refactor fully)
-    const combinedAssets = [...assets];
-    if (window.altcoinOpportunities && window.altcoinOpportunities.length > 0) {
-      window.altcoinOpportunities.forEach(opp => {
-        if (!combinedAssets.find(a => a.symbol === opp.symbol)) {
-          combinedAssets.push({
-            symbol: opp.symbol,
-            name: opp.name,
-            price: opp.price,
-            change24h: opp.momentum,
-            volume24h: opp.volume24h || 0,
-            marketCap: opp.marketCap,
-            icon: opp.symbol.substring(0, 2),
-            color: "bg-cyan-500"
-          });
-        }
-      });
-    }
-
-    const combinedConfidence = { ...assetConfidence };
-    if (window.altcoinOpportunities) {
-      window.altcoinOpportunities.forEach(opp => {
-        combinedConfidence[opp.symbol] = opp.confidence;
-      });
-    }
-
-    try {
-      const result = await executeAutoTradingCheckAdvanced(
-        combinedAssets,
-        combinedConfidence,
-        autoTradingSettings,
-        portfolio,
-        async (opportunity) => {
-          // ... execution logic matching the useEffect one ...
-          // For simplicity, calling the internal handleExecuteTrade wrapper directly if possible
-          // But the smart routing logic is complex.
-          // Ideally we should extract the execution callback generator too.
-          
-          // Re-implementing the callback logic briefly here for robustness
-          console.log(`🎯 Opportunity identified: ${formatOpportunityLog(opportunity)}`);
-
-          if (autoTradingSettings.use_smart_routing) {
-            const smartExecutionResult = await executeSmartOrder(
-              opportunity,
-              autoTradingSettings,
-              portfolio,
-              async (enhancedOpportunity) => {
-                await handleAutoTrade(
-                  opportunity.asset,
-                  opportunity.action === 'partial_sell' ? 'sell' : enhancedOpportunity.action,
-                  enhancedOpportunity.quantity || opportunity.quantity,
-                  opportunity.confidence,
-                  opportunity.riskLevel
-                );
-                return { success: true, executionPrice: enhancedOpportunity.price };
-              }
-            );
-            return smartExecutionResult;
-          } else {
-            await handleAutoTrade(
-              opportunity.asset,
-              opportunity.action === 'partial_sell' ? 'sell' : opportunity.action,
-              opportunity.quantity,
-              opportunity.confidence,
-              opportunity.riskLevel
-            );
-            return { success: true };
-          }
-        },
-        async (update) => {
-           // Position update logic
-           console.log(`📊 Position update: ${update.asset.symbol}`);
-           // ... simplified update logic ...
-           // We can assume the standard updatePortfolioMutation works
-        }
-      );
-      
-      if (result.executed) {
-        console.log('✅ TRADE EXECUTED!');
-        // Refresh queries
-        queryClient.invalidateQueries({ queryKey: ['portfolio'] });
-        queryClient.invalidateQueries({ queryKey: ['trades'] });
-        queryClient.invalidateQueries({ queryKey: ['auto-trading-settings'] });
-      } else {
-        console.log('ℹ️ No trade executed:', result.reason);
-      }
-      return result;
-    } catch (error) {
-      console.error('Manual check failed:', error);
-      throw error;
-    }
-  };
 
   const calculateAIConfidence = async () => {
     const confidence = {};
@@ -1832,15 +1416,12 @@ export default function Trading() {
           </div>
         )}
 
-        <BackendMigrationGuide isActive={hasBackendFunctions} />
-
         <AutoTradingDebugPanel
           autoTradingSettings={autoTradingSettings}
           portfolio={portfolio}
           assets={assets}
           assetConfidence={assetConfidence}
           isEnabled={autoTradingSettings?.is_enabled || false}
-          onManualCheck={runBrowserAutoTrading}
         />
 
         {priceUpdateError && consecutiveFailures < 3 && (
