@@ -814,7 +814,7 @@ export default function Trading() {
           if (mine.halted) { setLastScanResult(`HALTED: ${mine.reason || 'Risk guard triggered'}`); return; }
           if (mine.skipped) { setLastScanResult(`SKIPPED: ${mine.reason || 'Conditions not met'}`); return; }
           if (mine.trades_executed > 0) {
-            const actions = (mine.trade_actions || []).map(t => `${(t.action || '').toUpperCase()} ${t.asset_symbol}`).join(', ');
+            const actions = (mine.trade_actions || []).map(t => `${(t.action || '').toUpperCase()} ${t.asset_symbol || t.symbol}`).join(', ');
             setLastScanResult(`EXECUTED: ${mine.trades_executed} trade(s)${actions ? ' — ' + actions : ''}`);
             return;
           }

@@ -124,7 +124,11 @@ Deno.serve(async (req) => {
             new_entries_allowed: result.newEntriesAllowed,
             trade_actions: (result.trades || []).map(t => ({
               action: t.action || t.trade_type,
-              asset_symbol: t.asset_symbol,
+              // LOCAL FIX (2026-10-27): the worker's action entries carry
+              // `symbol` (e.g. { symbol, action }), while trade-records carry
+              // `asset_symbol`. Read both so the activity line always has the
+              // actual ticker instead of "SELL undefined".
+              asset_symbol: t.asset_symbol ?? t.symbol,
               quantity: t.quantity,
               price: t.price,
               reason: t.reason,
