@@ -785,9 +785,22 @@ export default function Trading() {
         if (!sched?.lastRun) return;
 
         setLastBackendRun(sched.lastRun.tradingScheduler?.at ? new Date(sched.lastRun.tradingScheduler.at) : null);
-        setBackendDebugLog(sched.lastRun.tradingScheduler ?? null);
 
-        const run = sched.lastRun.tradingScheduler;
+        // LOCAL CHANGE (2026-10-27): BackendResultPanel expects the scheduler
+        // function's own response ({success, summary, userDetails}), not this
+        // wrapper ({at, ok, result}). Passing the wrapper made the panel read
+        // `result.success` as undefined and render "Trade check failed —
+        // Unknown error" for perfectly healthy runs.
+        const schedulerRun = sched.lastRun.tradingScheduler;
+        if (!schedulerRun) {
+          setBackendDebugLog(null);
+        } else if (schedulerRun.ok === false) {
+          setBackendDebugLog({ success: false, error: schedulerRun.error });
+        } else {
+          setBackendDebugLog(schedulerRun.result ?? null);
+        }
+
+        const run = schedulerRun;
         if (!run) return;
         setLastScanTime(Date.now());
         if (run.ok === false && run.error) {
