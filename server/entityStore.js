@@ -53,7 +53,11 @@ export class EntityStore {
     }
 
     try {
-      const rows = JSON.parse(readFileSync(file, 'utf8'));
+      // BOM-tolerant: Windows tooling (PowerShell 5.1 redirects, some editors)
+      // writes UTF-8 with a leading BOM, which JSON.parse rejects. A settings
+      // file turning "corrupt" because of three invisible bytes is a cruel
+      // way to lose a trading session — strip it before parsing.
+      const rows = JSON.parse(readFileSync(file, 'utf8').replace(/^[\uFEFF]/, ''));
       const list = Array.isArray(rows) ? rows : [];
       this.cache.set(name, list);
       return list;
