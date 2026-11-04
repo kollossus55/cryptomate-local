@@ -12,10 +12,11 @@ import {
   voteFromScore, coordinate, runCommittee, resolveCommitteeSettings,
   deriveHigherTimeframe, buildContext, shouldLogDecision, toDecisionRecord,
   marketRegimeAgent, derivativesAgent, liquidityAgent, candlePrePass, buildMarketContext,
-  computeOutcome, outcomeRipeHours, filterVerdict,
+  computeOutcome, outcomeRipeHours, filterVerdict, decisionKey,
   AGENT_NAMES, LONG_AT, AGAINST_AT,
 } from '../shared/trading/committee.js';
 import { EntityStore } from '../server/entityStore.js';
+import { dedupeDecisions, summarizeFilter, agentScorecard, engineComparison, outcomeSummary } from '../src/lib/committeeStats.js';
 
 let passed = 0, failed = 0;
 const test = (name, fn) => {
@@ -415,6 +416,76 @@ test('filter: decision record carries the verdict (null when legacy skipped)', (
   assert.strictEqual(rec.filter_reason, 'r');
   const skip = toDecisionRecord({ result, cycleId: 'c', evaluatedAt: 'now', interval: '1h', mode: 'shadow', legacyDecision: 'skip' });
   assert.strictEqual(skip.filter_verdict, null);
+});
+
+// --- phase 3: dedupe + page stats --------------------------------------------
+
+test('decisionKey: symbol + candle + legacy decision', () => {
+  assert.strictEqual(decisionKey({ symbol: 'A', bar_time: 'T', legacy_decision: 'enter' }), 'A|T|enter');
+  const result = runCommittee({ symbol: 'UPUSDT', candles: uptrend }, {});
+  const rec = toDecisionRecord({ result, cycleId: 'c', evaluatedAt: 'now', interval: '1h', mode: 'shadow', legacyDecision: 'skip', barTime: '2026-11-04T16:00:00.000Z' });
+  assert.strictEqual(rec.bar_time, '2026-11-04T16:00:00.000Z');
+});
+
+const rec = (o) => ({ symbol: 'A', bar_time: 'T1', legacy_decision: 'enter', filter_verdict: 'allow', evaluated_at: '2026-11-04T16:05:00Z', votes: [], outcome: null, ...o });
+const out = (first_hit, ret_24h = 0) => ({ first_hit, ret_24h, max_up: 1, max_down: -1 });
+
+test('stats: dedupe keeps the earliest per symbol/candle/decision, enter separate from skip', () => {
+  const rows = dedupeDecisions([
+    rec({ id: 2, evaluated_at: '2026-11-04T16:10:00Z' }),
+    rec({ id: 1, evaluated_at: '2026-11-04T16:05:00Z' }),
+    rec({ id: 3, legacy_decision: 'skip' }),
+    rec({ id: 4, bar_time: 'T2' }),
+  ]);
+  assert.deepStrictEqual(rows.map((r) => r.id).sort(), [1, 3, 4]);
+});
+test('stats: dedupe falls back to the evaluated hour without bar_time', () => {
+  const rows = dedupeDecisions([rec({ id: 1, bar_time: undefined }), rec({ id: 2, bar_time: undefined, evaluated_at: '2026-11-04T16:55:00Z' }), rec({ id: 3, bar_time: undefined, evaluated_at: '2026-11-04T17:00:00Z' })]);
+  assert.strictEqual(rows.length, 2);
+});
+test('stats: outcomeSummary counts only resolved rows', () => {
+  const s = outcomeSummary([rec({ outcome: out('tp', 4) }), rec({ outcome: out('sl', -2) }), rec({})]);
+  assert.strictEqual(s.total, 3); assert.strictEqual(s.resolved, 2); assert.strictEqual(s.pending, 1);
+  assert.strictEqual(s.winRate, 50); assert.strictEqual(s.stopRate, 50); assert.strictEqual(s.avgRet24h, 1);
+});
+const many = (n, verdict, hit, extra = {}) => Array.from({ length: n }, (_, i) => rec({ symbol: verdict + hit + i, filter_verdict: verdict, outcome: out(hit), ...extra }));
+test('stats: filter verdict waits for the minimum sample', () => {
+  const s = summarizeFilter([...many(5, 'allow', 'tp'), ...many(5, 'block', 'sl')]);
+  assert.strictEqual(s.verdict, 'collecting');
+});
+test('stats: filter verdict helping / hurting / inconclusive', () => {
+  const help = summarizeFilter([...many(20, 'allow', 'tp'), ...many(20, 'allow', 'sl'), ...many(10, 'block', 'tp'), ...many(30, 'block', 'sl')], { minSample: 30 });
+  assert.strictEqual(help.verdict, 'helping');
+  const hurt = summarizeFilter([...many(10, 'allow', 'tp'), ...many(30, 'allow', 'sl'), ...many(20, 'block', 'tp'), ...many(20, 'block', 'sl')], { minSample: 30 });
+  assert.strictEqual(hurt.verdict, 'hurting');
+  const flat = summarizeFilter([...many(20, 'allow', 'tp'), ...many(20, 'allow', 'sl'), ...many(20, 'block', 'tp'), ...many(20, 'block', 'sl')], { minSample: 30 });
+  assert.strictEqual(flat.verdict, 'inconclusive');
+});
+test('stats: filter ignores non-picks and groups block reasons by veto agent', () => {
+  const vetoVotes = [{ agent: 'derivatives', eligible: true, veto: { reason: 'x' }, vote: 'against' }];
+  const s = summarizeFilter([
+    rec({ symbol: 'S', legacy_decision: 'skip', filter_verdict: null }),
+    rec({ symbol: 'B1', filter_verdict: 'block', votes: vetoVotes }),
+    rec({ symbol: 'B2', filter_verdict: 'block', votes: [] }),
+  ]);
+  assert.strictEqual(s.picks, 2);
+  assert.deepStrictEqual(s.blockReasons.map((b) => b.label).sort(), ['against votes', 'veto: derivatives']);
+});
+test('stats: agent scorecard buckets votes on legacy picks', () => {
+  const rows = [
+    rec({ symbol: 'X', outcome: out('tp'), votes: [{ agent: 'trend', vote: 'long', data_ok: true }, { agent: 'liquidity', vote: 'abstain', data_ok: false }] }),
+    rec({ symbol: 'Y', outcome: out('sl'), votes: [{ agent: 'trend', vote: 'against', data_ok: true }] }),
+    rec({ symbol: 'Z', legacy_decision: 'skip', votes: [{ agent: 'trend', vote: 'long', data_ok: true }] }),
+  ];
+  const card = agentScorecard(rows);
+  const trend = card.find((a) => a.agent === 'trend');
+  assert.strictEqual(trend.long.total, 1); assert.strictEqual(trend.long.winRate, 100);
+  assert.strictEqual(trend.against.total, 1); assert.strictEqual(trend.against.winRate, 0);
+  assert.strictEqual(card.find((a) => a.agent === 'liquidity').noData, 1);
+});
+test('stats: engine comparison', () => {
+  const e = engineComparison([rec({ symbol: 'L', decision: 'no_quorum', outcome: out('tp') }), rec({ symbol: 'C', legacy_decision: 'skip', decision: 'enter', outcome: out('sl') })]);
+  assert.strictEqual(e.legacy.total, 1); assert.strictEqual(e.committee.total, 1); assert.strictEqual(e.committee.winRate, 0);
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

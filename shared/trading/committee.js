@@ -791,8 +791,20 @@ export function computeOutcome(candles, evaluatedAtMs, { takeProfitPercent = 8, 
 }
 
 /** Shape a committee result into a CommitteeDecision entity record. */
-export function toDecisionRecord({ result, cycleId, evaluatedAt, interval, mode, legacyDecision, legacyStrength, legacyTraded, ownerEmail, filter }) {
+/**
+ * Dedupe key for one decision: the worker runs every 5 minutes but a decision
+ * belongs to a candle, so each (symbol, candle, legacy decision) is logged once.
+ * Keeping legacy_decision in the key lets a later 'enter' in the same candle
+ * still be recorded after an earlier 'skip'.
+ */
+export function decisionKey({ symbol, bar_time, legacy_decision }) {
+  return `${symbol}|${bar_time}|${legacy_decision}`;
+}
+
+export function toDecisionRecord({ result, cycleId, evaluatedAt, interval, mode, legacyDecision, legacyStrength, legacyTraded, ownerEmail, filter, barTime }) {
   return {
+    // Open time (ISO) of the newest candle the committee saw.
+    bar_time: barTime ?? null,
     // Filter role: the committee's verdict on a legacy entry (null when the
     // legacy engine did not want this asset — there is nothing to filter).
     filter_verdict: filter?.verdict ?? null,

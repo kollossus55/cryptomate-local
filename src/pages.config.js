@@ -52,6 +52,7 @@ import AdminDashboard from './pages/AdminDashboard';
 import Alerts from './pages/Alerts';
 import AutoTrading from './pages/AutoTrading';
 import Backtesting from './pages/Backtesting';
+import Committee from './pages/Committee'; // LOCAL CHANGE: agent committee, phase 3
 import ExchangeSettings from './pages/ExchangeSettings';
 import Home from './pages/Home';
 import Insights from './pages/Insights';
@@ -67,6 +68,7 @@ export const PAGES = {
     "Alerts": Alerts,
     "AutoTrading": AutoTrading,
     "Backtesting": Backtesting,
+    "Committee": Committee,
     "ExchangeSettings": ExchangeSettings,
     "Home": Home,
     "Insights": Insights,

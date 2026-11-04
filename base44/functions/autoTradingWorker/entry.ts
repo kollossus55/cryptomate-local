@@ -5,7 +5,7 @@ import { scoreAsset, MIN_CANDLES } from './shared/signalEngine.js';
 // LOCAL CHANGE: agent committee, phases 1-2 (shadow logging only).
 import {
   runCommittee, candlePrePass, buildMarketContext, resolveCommitteeSettings, filterVerdict,
-  shouldLogDecision, toDecisionRecord, COMMITTEE_RETENTION_DAYS,
+  shouldLogDecision, toDecisionRecord, decisionKey, COMMITTEE_RETENTION_DAYS,
 } from './shared/committee.js';
 import { applyCosts, roundTripCostPercent, isEdgeSufficient } from './shared/costs.js';
 import { calculatePositionSize, checkCorrelation, buildReturnsMap, checkPortfolioExposure } from './shared/sizing.js';
@@ -1073,6 +1073,14 @@ async function runTradingCycle({ base44, settings, portfolio, user_email, log, n
           });
           const limits = { maxSlippagePercent: settings.max_slippage_percent ?? 0.5 };
 
+          // The worker runs every 5 minutes; a decision belongs to a candle.
+          // Keys already logged within the last candle span are skipped below.
+          const barSpanMs = ({ '15m': 9e5, '30m': 18e5, '1h': 36e5, '4h': 144e5, '1d': 864e5 })[candleInterval] || 36e5;
+          const recent = await base44.asServiceRole.entities.CommitteeDecision.filter({
+            evaluated_at: { $gte: new Date(now.getTime() - barSpanMs).toISOString() },
+          }).catch(() => []);
+          const loggedThisBar = new Set((recent || []).filter((r) => r.bar_time).map(decisionKey));
+
           for (const { symbol, candles } of pool) {
             const extra = extras.get(symbol) || {};
             const result = runCommittee({
@@ -1088,7 +1096,13 @@ async function runTradingCycle({ base44, settings, portfolio, user_email, log, n
             const filter = legacyDecision === 'enter' ? filterVerdict(result, committeeSettings) : null;
             if (filter?.verdict === 'block') wouldBlock.push(`${symbol} (${filter.reason})`);
             if (!shouldLogDecision(result, legacyDecision)) continue;
+            const lastOpen = candles[candles.length - 1]?.openTime;
+            const barTime = Number.isFinite(lastOpen) ? new Date(lastOpen).toISOString() : null;
+            const key = decisionKey({ symbol, bar_time: barTime, legacy_decision: legacyDecision });
+            if (barTime && loggedThisBar.has(key)) continue;   // already logged this candle
+            loggedThisBar.add(key);
             records.push(toDecisionRecord({
+              barTime,
               result,
               cycleId,
               evaluatedAt,
