@@ -78,6 +78,10 @@ export function runBacktest(candlesBySymbol, config = {}) {
     // Score legacy signals on the last N bars only (the live worker fetches
     // 200). null = full history, the original behaviour.
     signalLookback = null,
+    // Mirror the live "bearish confluence exit": after a bar closes, if the
+    // held asset's scoreAsset strength is below this number, sell at the NEXT
+    // bar's open. null = off (original behaviour: stop / target only).
+    signalExitBelow = null,
   } = config;
   const committeeMode = entryEngine === 'committee';
   const filterMode = entryEngine === 'filter';
@@ -192,9 +196,13 @@ export function runBacktest(candlesBySymbol, config = {}) {
       let exitPrice = null;
       let exitReason = null;
 
+      // A signal exit decided on the previous close fills at this bar's open.
+      if (position.exitAtOpen) {
+        exitPrice = bar.open;
+        exitReason = 'signal_exit';
       // Stop checked first. If the bar spans both levels we cannot know the
       // order without tick data, so we assume the unfavourable one filled.
-      if (bar.low <= position.stopPrice) {
+      } else if (bar.low <= position.stopPrice) {
         // LOCAL FIX: honour gaps. If the bar OPENED beyond the stop — illiquid
         // alts gap several percent between hourly bars — the price never
         // actually traded at the stop level. Filling there instead of at the
@@ -264,6 +272,12 @@ export function runBacktest(candlesBySymbol, config = {}) {
         if (position.trailingStop === null || newStop > position.trailingStop) {
           position.trailingStop = newStop;
         }
+      }
+
+      if (signalExitBelow !== null) {
+        const held = candles.slice(signalLookback ? Math.max(0, idx + 1 - signalLookback) : 0, idx + 1);
+        const sig = scoreAsset(held, { indicators });
+        if (sig && sig.strength < signalExitBelow) position.exitAtOpen = true;
       }
     }
 
