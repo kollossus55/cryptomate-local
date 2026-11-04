@@ -231,18 +231,25 @@ test('marketRegime vetoes a sharp BTC drop', () => {
   const v = marketRegimeAgent(ctxWith({ market: { btcCandles: crash, breadth: null } }), S);
   assert.ok(v.veto, 'expected a veto');
 });
-test('marketRegime vetoes weak breadth', () => {
-  const v = marketRegimeAgent(ctxWith({ market: { btcCandles: uptrend, breadth: { above: 2, total: 20, share: 0.1 } } }), S);
+test('marketRegime vetoes weak breadth when breadth_veto is set', () => {
+  const v = marketRegimeAgent(ctxWith({ market: { btcCandles: uptrend, breadth: { above: 2, total: 20, share: 0.1 } } }), resolveCommitteeSettings({ breadth_veto: 0.25 }));
   assert.ok(v.veto);
+});
+test('marketRegime breadth veto is off by default', () => {
+  const v = marketRegimeAgent(ctxWith({ market: { btcCandles: uptrend, breadth: { above: 2, total: 20, share: 0.1 } } }), S);
+  assert.ok(!v.veto);
+  assert.strictEqual(v.vote, 'abstain');
 });
 test('marketRegime never votes long, even in a strong market', () => {
   const v = marketRegimeAgent(ctxWith({ market: { btcCandles: uptrend, breadth: { above: 18, total: 20, share: 0.9 } } }), S);
   assert.strictEqual(v.vote, 'abstain');
   assert.ok(!v.veto);
 });
-test('marketRegime votes against in a weak market', () => {
+test('marketRegime abstains in a weak market but logs the reading', () => {
   const v = marketRegimeAgent(ctxWith({ market: { btcCandles: downtrend, breadth: { above: 6, total: 20, share: 0.3 } } }), S);
-  assert.strictEqual(v.vote, 'against');
+  assert.strictEqual(v.vote, 'abstain');
+  assert.ok(v.score <= 40, `score ${v.score} should still read weak`);
+  assert.match(v.reasons[0], /Weak market/);
 });
 test('marketRegime without BTC data is no-data', () => {
   assert.strictEqual(marketRegimeAgent(ctxWith({}), S).dataOk, false);

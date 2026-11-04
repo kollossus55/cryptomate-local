@@ -70,7 +70,11 @@ export const DEFAULT_COMMITTEE_SETTINGS = Object.freeze({
   // Market Regime vetoes when BTC fell this much (%) over the last 4 hours...
   btc_drop_veto_pct: 3,
   // ...or when fewer than this share of scanned assets sit above their EMA50.
-  breadth_veto: 0.25,
+  // 0 = off (default). On 240d of 4h OKX data (train slice only) the legacy
+  // signals this vetoed were the best in the sample: 320 signals over 63 days,
+  // 54% win, +2.4%/trade, positive in 5 of 6 months. A washed-out market is
+  // where alt reversals start, not a reason to stand aside.
+  breadth_veto: 0,
   // Derivatives vetoes at this funding rate per 8h (0.0005 = 0.05%, ~5x the
   // 0.01% baseline): longs are crowded and pay to stay in.
   funding_veto: 0.0005,
@@ -380,7 +384,7 @@ export function marketRegimeAgent(ctx, s) {
       reasons: [`BTC down ${(chg4 * 100).toFixed(1)}% over 4h — risk-off`],
     };
   }
-  if (breadth && breadth.share < s.breadth_veto) {
+  if (breadth && s.breadth_veto > 0 && breadth.share < s.breadth_veto) {
     return {
       agent: 'marketRegime', vote: 'against', confidence: 1, dataOk: true, score: 0,
       veto: { reason: `Breadth ${(breadth.share * 100).toFixed(0)}% above EMA50` },
@@ -407,15 +411,16 @@ export function marketRegimeAgent(ctx, s) {
   } else {
     reasons.push('Breadth unavailable (too few assets)');
   }
-  // One-sided by design: a strong market is permission to trade alts, not a
-  // reason to buy any particular one. Counting it as a long vote handed every
-  // asset the same free vote in strong markets (seen live: 19/30 would enter
-  // at 76% breadth). So it can restrain (against / veto) but never promote.
+  // Veto-only. The market reading is logged (score + reasons) but never voted:
+  //  - a long vote handed every asset the same free vote in strong markets
+  //    (seen live: 19/30 would enter at 76% breadth);
+  //  - an against vote did worse than nothing: it joins the voting pool, which
+  //    raises the quorum to all four candle agents and blocks exactly the
+  //    weak-market reversals that pay. Train-slice backtest (240d 4h):
+  //    committee -4.5% with it, +11.3% without; better in both train halves.
   const v = voteFromScore('marketRegime', score, reasons);
-  if (v.vote === 'long') {
-    return { ...v, vote: 'abstain', confidence: 0, reasons: ['Supportive market — permits, does not vote for any one asset', ...reasons] };
-  }
-  return v;
+  const label = v.vote === 'long' ? 'Supportive market' : v.vote === 'against' ? 'Weak market' : 'Neutral market';
+  return { ...v, vote: 'abstain', confidence: 0, reasons: [`${label} — informational, Market Regime only vetoes`, ...reasons] };
 }
 
 /**
