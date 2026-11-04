@@ -74,6 +74,13 @@ export function runBacktest(candlesBySymbol, config = {}) {
     committeeSettings = {},
     committeeLookback = 200,
     btcSymbol = 'BTCUSDT',
+    // LOCAL CHANGE (walk-forward research): take-profit as a multiple of the
+    // position's own stop distance (2 = target at 2x the stop). null keeps the
+    // flat takeProfitPercent. Exits only — sizing and the stop are unchanged.
+    takeProfitR = null,
+    // Score legacy signals on the last N bars only (the live worker fetches
+    // 200). null = full history, the original behaviour.
+    signalLookback = null,
   } = config;
   const committeeMode = entryEngine === 'committee';
   const filterMode = entryEngine === 'filter';
@@ -171,7 +178,7 @@ export function runBacktest(candlesBySymbol, config = {}) {
         // 6% stop" while actually risking 1% at a 3% stop, so per-trade risk
         // quietly depended on each asset's ATR rather than the configured %.
         stopPrice: costs.fillPrice * (1 - entry.stopDistancePercent / 100),
-        targetPrice: costs.fillPrice * (1 + takeProfitPercent / 100),
+        targetPrice: costs.fillPrice * (1 + (takeProfitR ? takeProfitR * entry.stopDistancePercent : takeProfitPercent) / 100),
       });
     }
     pendingEntries = [];
@@ -307,7 +314,7 @@ export function runBacktest(candlesBySymbol, config = {}) {
         if (filterMode && symbol === btcSymbol) continue;
 
         // The critical slice. Only bars up to and including t are visible.
-        const visible = candles.slice(0, idx + 1);
+        const visible = candles.slice(signalLookback ? Math.max(0, idx + 1 - signalLookback) : 0, idx + 1);
         const signal = scoreAsset(visible, { indicators });
         if (!signal) continue;
 
