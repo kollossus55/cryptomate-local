@@ -12,7 +12,7 @@ import {
   voteFromScore, coordinate, runCommittee, resolveCommitteeSettings,
   deriveHigherTimeframe, buildContext, shouldLogDecision, toDecisionRecord,
   marketRegimeAgent, derivativesAgent, liquidityAgent, candlePrePass, buildMarketContext,
-  computeOutcome, outcomeRipeHours,
+  computeOutcome, outcomeRipeHours, filterVerdict,
   AGENT_NAMES, LONG_AT, AGAINST_AT,
 } from '../shared/trading/committee.js';
 import { EntityStore } from '../server/entityStore.js';
@@ -367,6 +367,54 @@ test('bulkUpdate patches many rows in one write and counts unknown ids', () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// --- filter role -------------------------------------------------------------
+
+const fv = (votes) => ({ votes: votes.map((v) => ({ eligible: true, veto: false, ...v })) });
+test('filter: defaults to the filter role, blocking at 2 against', () => {
+  const s = resolveCommitteeSettings({});
+  assert.strictEqual(s.role, 'filter');
+  assert.strictEqual(s.block_against, 2);
+  assert.strictEqual(resolveCommitteeSettings({ role: 'nonsense' }).role, 'filter');
+});
+test('filter: no objections allows', () => {
+  assert.strictEqual(filterVerdict(fv([{ agent: 'trend', vote: 'long' }, { agent: 'momentum', vote: 'abstain' }]), {}).verdict, 'allow');
+});
+test('filter: one against allows, two block', () => {
+  assert.strictEqual(filterVerdict(fv([{ agent: 'trend', vote: 'against' }, { agent: 'momentum', vote: 'long' }]), {}).verdict, 'allow');
+  const r = filterVerdict(fv([{ agent: 'trend', vote: 'against' }, { agent: 'momentum', vote: 'against' }]), {});
+  assert.strictEqual(r.verdict, 'block');
+  assert.match(r.reason, /trend, momentum/);
+});
+test('filter: any veto blocks, even with every other agent long', () => {
+  const r = filterVerdict(fv([
+    { agent: 'trend', vote: 'long' }, { agent: 'momentum', vote: 'long' },
+    { agent: 'derivatives', vote: 'against', veto: { reason: 'Funding 0.080%/8h' } },
+  ]), {});
+  assert.strictEqual(r.verdict, 'block');
+  assert.match(r.reason, /derivatives.*Funding/);
+});
+test('filter: ineligible votes do not count', () => {
+  const r = filterVerdict(fv([
+    { agent: 'trend', vote: 'against', eligible: false },
+    { agent: 'momentum', vote: 'against' },
+    { agent: 'liquidity', vote: 'against', veto: { reason: 'x' }, eligible: false },
+  ]), {});
+  assert.strictEqual(r.verdict, 'allow');
+});
+test('filter: block_against is configurable; null result allows', () => {
+  const two = fv([{ agent: 'trend', vote: 'against' }, { agent: 'momentum', vote: 'against' }]);
+  assert.strictEqual(filterVerdict(two, { block_against: 3 }).verdict, 'allow');
+  assert.strictEqual(filterVerdict(null, {}).verdict, 'allow');
+});
+test('filter: decision record carries the verdict (null when legacy skipped)', () => {
+  const result = runCommittee({ symbol: 'UPUSDT', candles: uptrend }, {});
+  const rec = toDecisionRecord({ result, cycleId: 'c', evaluatedAt: 'now', interval: '1h', mode: 'shadow', legacyDecision: 'enter', filter: { verdict: 'block', reason: 'r' } });
+  assert.strictEqual(rec.filter_verdict, 'block');
+  assert.strictEqual(rec.filter_reason, 'r');
+  const skip = toDecisionRecord({ result, cycleId: 'c', evaluatedAt: 'now', interval: '1h', mode: 'shadow', legacyDecision: 'skip' });
+  assert.strictEqual(skip.filter_verdict, null);
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

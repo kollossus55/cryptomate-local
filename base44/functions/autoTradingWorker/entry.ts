@@ -4,7 +4,7 @@ import { fetchUniverse, fetchCandlesBatch, fetchOrderBook, fetchPricesForSymbols
 import { scoreAsset, MIN_CANDLES } from './shared/signalEngine.js';
 // LOCAL CHANGE: agent committee, phases 1-2 (shadow logging only).
 import {
-  runCommittee, candlePrePass, buildMarketContext, resolveCommitteeSettings,
+  runCommittee, candlePrePass, buildMarketContext, resolveCommitteeSettings, filterVerdict,
   shouldLogDecision, toDecisionRecord, COMMITTEE_RETENTION_DAYS,
 } from './shared/committee.js';
 import { applyCosts, roundTripCostPercent, isEdgeSufficient } from './shared/costs.js';
@@ -1029,6 +1029,7 @@ async function runTradingCycle({ base44, settings, portfolio, user_email, log, n
           const records = [];
           let evaluated = 0;
           let wouldEnter = 0;
+          const wouldBlock = [];
 
           // Phase 2: market-wide context once per cycle (BTC + breadth).
           const btcCandles = candlesBySymbol.get('BTCUSDT')
@@ -1050,10 +1051,12 @@ async function runTradingCycle({ base44, settings, portfolio, user_email, log, n
           // The extra OKX calls (derivatives + order book) go to the best
           // pre-pass assets only, within the fetch budget. Everyone else gets
           // "not fetched" for those agents, which counts as no vote.
+          // Filter role: every legacy pick gets the live-only checks first —
+          // funding and liquidity vetoes are the filter's main teeth.
           const fetchSet = pool
-            .filter((p) => p.preLong >= 2)
-            .sort((a, b) => b.preLong - a.preLong)
-            .slice(0, committeeSettings.context_fetch_budget);
+            .filter((p) => p.preLong >= 2 || legacyEnter.has(p.symbol))
+            .sort((a, b) => (legacyEnter.has(b.symbol) - legacyEnter.has(a.symbol)) || (b.preLong - a.preLong))
+            .slice(0, Math.max(committeeSettings.context_fetch_budget, legacyEnter.size));
           const extras = new Map();
           const runPool = async (items, limit, fn) => {
             let i = 0;
@@ -1081,6 +1084,9 @@ async function runTradingCycle({ base44, settings, portfolio, user_email, log, n
             if (result.decision === 'enter') wouldEnter++;
 
             const legacyDecision = legacyEnter.has(symbol) ? 'enter' : 'skip';
+            // Filter role (shadow): would the committee have blocked this legacy pick?
+            const filter = legacyDecision === 'enter' ? filterVerdict(result, committeeSettings) : null;
+            if (filter?.verdict === 'block') wouldBlock.push(`${symbol} (${filter.reason})`);
             if (!shouldLogDecision(result, legacyDecision)) continue;
             records.push(toDecisionRecord({
               result,
@@ -1092,6 +1098,7 @@ async function runTradingCycle({ base44, settings, portfolio, user_email, log, n
               legacyStrength: legacyStrength.get(symbol),
               legacyTraded: boughtNow.has(symbol),
               ownerEmail: user_email,
+              filter,
             }));
           }
 
@@ -1104,6 +1111,10 @@ async function runTradingCycle({ base44, settings, portfolio, user_email, log, n
           log(`Committee (shadow): ${evaluated} evaluated, ${wouldEnter} would enter, ${vetoed} vetoed, ` +
               `legacy entered ${legacyEnter.size}, context fetched for ${extras.size}, ${records.length} logged` +
               (market.breadth ? `, breadth ${(market.breadth.share * 100).toFixed(0)}%` : ''));
+          if (committeeSettings.role === 'filter' && legacyEnter.size) {
+            log(`Committee filter (shadow): would block ${wouldBlock.length}/${legacyEnter.size} legacy picks` +
+                (wouldBlock.length ? ` — ${wouldBlock.join('; ')}` : ''));
+          }
         }
       } catch (e) {
         log(`Committee shadow run failed (trading unaffected): ${e.message}`);

@@ -91,7 +91,20 @@ export const DEFAULT_COMMITTEE_SETTINGS = Object.freeze({
   // At most this many assets per cycle get the extra OKX calls (derivatives +
   // order book), best candle pre-pass first. Keeps within OKX rate limits.
   context_fetch_budget: 40,
+
+  // --- filter role ---
+  // 'filter' (default): the legacy engine picks entries and the committee may
+  // only BLOCK one (any veto, or block_against+ agents voting against).
+  // 'replace': the committee picks entries itself (phases 1-2). On 4h OKX
+  // history the candle agents picked no better than a random bar, while
+  // legacy signals with 2+ against votes lost money — so the committee earns
+  // its keep as an objector, not a selector.
+  role: 'filter',
+  // Eligible against votes that block a legacy entry in the filter role.
+  block_against: 2,
 });
+
+export const COMMITTEE_ROLES = ['filter', 'replace'];
 
 /** Days of CommitteeDecision records to keep. */
 export const COMMITTEE_RETENTION_DAYS = 30;
@@ -114,6 +127,8 @@ export function resolveCommitteeSettings(raw) {
   s.max_spread_pct = Math.max(0, num(s.max_spread_pct, d.max_spread_pct));
   s.liquidity_probe_usdt = Math.max(10, num(s.liquidity_probe_usdt, d.liquidity_probe_usdt));
   s.context_fetch_budget = Math.max(0, Math.round(num(s.context_fetch_budget, d.context_fetch_budget)));
+  if (!COMMITTEE_ROLES.includes(s.role)) s.role = d.role;
+  s.block_against = Math.max(1, Math.round(num(s.block_against, d.block_against)));
   return s;
 }
 
@@ -656,6 +671,27 @@ export function runCommittee(input, rawSettings) {
 }
 
 /**
+ * Filter role: should the committee BLOCK an entry the legacy engine chose?
+ * Only objections count — a veto from any eligible agent, or block_against or
+ * more eligible against votes. Long votes and the committee score are ignored:
+ * the committee never adds a trade in this role, it can only remove one.
+ */
+export function filterVerdict(result, rawSettings) {
+  if (!result) return { verdict: 'allow', reason: 'Committee had no reading' };
+  const s = resolveCommitteeSettings(rawSettings);
+  const eligible = (result.votes || []).filter((v) => v.eligible);
+  const vetoes = eligible.filter((v) => v.veto);
+  if (vetoes.length) {
+    return { verdict: 'block', reason: `Vetoed by ${vetoes.map((v) => v.agent).join(', ')}: ${vetoes.map((v) => v.veto.reason).join('; ')}` };
+  }
+  const againsts = eligible.filter((v) => v.vote === 'against');
+  if (againsts.length >= s.block_against) {
+    return { verdict: 'block', reason: `${againsts.length} against (block at ${s.block_against}): ${againsts.map((v) => v.agent).join(', ')}` };
+  }
+  return { verdict: 'allow', reason: againsts.length ? `${againsts.length} against, under ${s.block_against}` : 'No objections' };
+}
+
+/**
  * Cheap first pass: candle agents only, no network. The worker uses the long
  * count to decide which assets earn the extra OKX calls this cycle.
  */
@@ -758,8 +794,12 @@ export function computeOutcome(candles, evaluatedAtMs, { takeProfitPercent = 8, 
 }
 
 /** Shape a committee result into a CommitteeDecision entity record. */
-export function toDecisionRecord({ result, cycleId, evaluatedAt, interval, mode, legacyDecision, legacyStrength, legacyTraded, ownerEmail }) {
+export function toDecisionRecord({ result, cycleId, evaluatedAt, interval, mode, legacyDecision, legacyStrength, legacyTraded, ownerEmail, filter }) {
   return {
+    // Filter role: the committee's verdict on a legacy entry (null when the
+    // legacy engine did not want this asset — there is nothing to filter).
+    filter_verdict: filter?.verdict ?? null,
+    filter_reason: filter?.reason ?? null,
     cycle_id: cycleId,
     evaluated_at: evaluatedAt,
     symbol: result.symbol,

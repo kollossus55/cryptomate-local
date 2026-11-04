@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 /**
  * LOCAL CHANGE (agent committee, phase 2): legacy engine vs agent committee on
- * the same OKX history, same exits, sizing and costs.
+ * the same OKX history, same exits, sizing and costs. Three engines: legacy,
+ * filter (legacy picks, committee may only block — the default role) and
+ * committee (committee picks entries itself).
  *
  *   npm run compare:committee                       # account's interval, top 20 alts
  *   npm run compare:committee -- --interval 1h --days 60 --top 30
@@ -84,17 +86,18 @@ const { train, test } = splitTrainTest(all, 0.7);
 const withoutBtc = (m) => new Map([...m].filter(([s]) => s !== 'BTCUSDT'));
 
 function run(data, engine) {
-  const cfg = engine === 'committee'
-    ? { ...base, entryEngine: 'committee', committeeSettings: settings.committee || {} }
-    : base;
-  // Legacy never sees BTC (an altcoin universe); committee uses it as context only.
-  const r = runBacktest(engine === 'committee' ? data : withoutBtc(data), cfg);
+  const cfg = engine === 'legacy'
+    ? base
+    : { ...base, entryEngine: engine, committeeSettings: settings.committee || {} };
+  // Legacy never sees BTC (an altcoin universe); committee/filter use it as context only.
+  const r = runBacktest(engine === 'legacy' ? withoutBtc(data) : data, cfg);
   return r.metrics || { error: r.error };
 }
 
 const rows = [];
 for (const [label, data] of [['train (first 70%)', train], ['test (last 30%)', test]]) {
-  for (const engine of ['legacy', 'committee']) {
+  // filter = legacy picks, committee may only block (the default role).
+  for (const engine of ['legacy', 'filter', 'committee']) {
     const t0 = Date.now();
     const m = run(data, engine);
     rows.push({ period: label, engine, m, secs: ((Date.now() - t0) / 1000).toFixed(0) });

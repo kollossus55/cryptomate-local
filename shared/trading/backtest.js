@@ -29,7 +29,7 @@ import { scoreAsset, MIN_CANDLES } from './signalEngine.js';
 import { applyCosts } from './costs.js';
 import { atr, atrPercent } from './indicators.js';
 // LOCAL CHANGE (agent committee, phase 2): committee replay mode.
-import { runCommittee, buildMarketContext } from './committee.js';
+import { runCommittee, buildMarketContext, filterVerdict } from './committee.js';
 
 const INTERVAL_NAMES = { 900_000: '15m', 1_800_000: '30m', 3_600_000: '1h', 14_400_000: '4h', 86_400_000: '1d' };
 
@@ -64,12 +64,17 @@ export function runBacktest(candlesBySymbol, config = {}) {
     // from btcSymbol if it is in the data, and NO derivatives or order book —
     // there is no honest history for those, so those agents abstain as
     // no-data. Exits, sizing and costs are identical in both modes.
+    // 'filter': legacy picks entries exactly as in 'legacy' mode, then the
+    // committee may only block one (committee.filterVerdict). BTC is context,
+    // never a candidate, as in 'committee' mode.
     entryEngine = 'legacy',
     committeeSettings = {},
     committeeLookback = 200,
     btcSymbol = 'BTCUSDT',
   } = config;
   const committeeMode = entryEngine === 'committee';
+  const filterMode = entryEngine === 'filter';
+  let blockedByFilter = 0;
   const committeeInterval = INTERVAL_NAMES[candleIntervalMs] || '1h';
 
   const symbols = [...candlesBySymbol.keys()];
@@ -265,7 +270,7 @@ export function runBacktest(candlesBySymbol, config = {}) {
       // built from those same windows — all strictly bars <= t.
       let windows = null;
       let market = null;
-      if (committeeMode) {
+      if (committeeMode || filterMode) {
         windows = new Map();
         for (const symbol of symbols) {
           const idx = indexBySymbol.get(symbol).get(barTime);
@@ -296,12 +301,18 @@ export function runBacktest(candlesBySymbol, config = {}) {
           continue;
         }
 
+        if (filterMode && symbol === btcSymbol) continue;
+
         // The critical slice. Only bars up to and including t are visible.
         const visible = candles.slice(0, idx + 1);
         const signal = scoreAsset(visible, { indicators });
         if (!signal) continue;
 
         if (signal.strength >= minStrength && signal.direction === 'bullish') {
+          if (filterMode) {
+            const result = runCommittee({ symbol, candles: windows.get(symbol), interval: committeeInterval, market }, committeeSettings);
+            if (filterVerdict(result, committeeSettings).verdict === 'block') { blockedByFilter++; continue; }
+          }
           candidates.push({ symbol, signal, visible });
         }
       }
@@ -413,7 +424,7 @@ export function runBacktest(candlesBySymbol, config = {}) {
 
   const benchmark = calculateBuyAndHold(candlesBySymbol, timeline, warmupBars, initialCapital);
 
-  return { trades, equityCurve, metrics, benchmark, config, barsSimulated: timeline.length - warmupBars - 1 };
+  return { trades, equityCurve, metrics, benchmark, config, barsSimulated: timeline.length - warmupBars - 1, blockedByFilter };
 }
 
 // ---------------------------------------------------------------------------
