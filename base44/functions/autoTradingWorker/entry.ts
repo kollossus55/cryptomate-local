@@ -2,6 +2,10 @@ import { createClientFromRequest } from 'npm:@base44/sdk@0.8.43';
 
 import { fetchUniverse, fetchCandlesBatch, fetchOrderBook, fetchPricesForSymbols } from './shared/marketData.js';
 import { scoreAsset, MIN_CANDLES } from './shared/signalEngine.js';
+// LOCAL CHANGE: agent committee, phase 1 (shadow logging only).
+import {
+  runCommittee, resolveCommitteeSettings, shouldLogDecision, toDecisionRecord, COMMITTEE_RETENTION_DAYS,
+} from './shared/committee.js';
 import { applyCosts, roundTripCostPercent, isEdgeSufficient } from './shared/costs.js';
 import { calculatePositionSize, checkCorrelation, buildReturnsMap, checkPortfolioExposure } from './shared/sizing.js';
 import { rollDailyCounters, evaluateAllGuards, utcDayKey, checkPortfolioTakeProfit, checkPortfolioTakeProfitCooldown } from './shared/risk.js';
@@ -1002,6 +1006,66 @@ async function runTradingCycle({ base44, settings, portfolio, user_email, log, n
         } else {
           log(`Buy rejected for ${ticker.symbol}: ${buy.reason}`);
         }
+      }
+
+      // LOCAL CHANGE: agent committee, phase 1 — SHADOW ONLY.
+      // Runs after the legacy entries above have executed, over the same
+      // candidates and candles, and only writes CommitteeDecision records. It
+      // never adds, blocks or sizes a trade; any failure is logged and swallowed
+      // so the trading cycle is unaffected. Re-copying this file from Base44
+      // drops this block — see README.
+      try {
+        const committeeSettings = resolveCommitteeSettings(settings.committee);
+        if (committeeSettings.mode !== 'off') {
+          if (committeeSettings.mode === 'live') {
+            log('Committee mode "live" is not enabled until the phase-3 go/no-go — running in shadow');
+          }
+          const legacyEnter = new Set(candidates.map((c) => c.ticker.symbol));
+          const legacyStrength = new Map(scanned.map((s) => [s.symbol, s.strength]));
+          const boughtNow = new Set(actions.filter((a) => a.action === 'buy').map((a) => a.symbol));
+          const cycleId = crypto.randomUUID();
+          const evaluatedAt = new Date().toISOString();
+          const records = [];
+          let evaluated = 0;
+          let wouldEnter = 0;
+
+          for (const ticker of candidateTickers) {
+            const symbol = ticker.symbol;
+            if (heldNow.includes(symbol)) continue;
+            if (counters.assets_traded_today.includes(symbol) && !boughtNow.has(symbol)) continue;
+            const candles = candlesBySymbol.get(symbol);
+            if (!candles || candles.length < MIN_CANDLES) continue;
+
+            const result = runCommittee({ symbol, candles, interval: candleInterval }, committeeSettings);
+            if (!result) continue;
+            evaluated++;
+            if (result.decision === 'enter') wouldEnter++;
+
+            const legacyDecision = legacyEnter.has(symbol) ? 'enter' : 'skip';
+            if (!shouldLogDecision(result, legacyDecision)) continue;
+            records.push(toDecisionRecord({
+              result,
+              cycleId,
+              evaluatedAt,
+              interval: candleInterval,
+              mode: 'shadow',
+              legacyDecision,
+              legacyStrength: legacyStrength.get(symbol),
+              legacyTraded: boughtNow.has(symbol),
+              ownerEmail: user_email,
+            }));
+          }
+
+          if (records.length) {
+            await base44.asServiceRole.entities.CommitteeDecision.bulkCreate(records);
+          }
+          const cutoff = new Date(now.getTime() - COMMITTEE_RETENTION_DAYS * 864e5).toISOString();
+          await base44.asServiceRole.entities.CommitteeDecision.deleteMany({ evaluated_at: { $lt: cutoff } });
+          log(`Committee (shadow): ${evaluated} evaluated, ${wouldEnter} would enter, ` +
+              `legacy entered ${legacyEnter.size}, ${records.length} logged`);
+        }
+      } catch (e) {
+        log(`Committee shadow run failed (trading unaffected): ${e.message}`);
       }
     }
   }

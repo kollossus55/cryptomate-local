@@ -543,3 +543,15 @@ export function calibrate(strength, model = null) {
   const z = model.intercept + model.slope * strength;
   return 1 / (1 + Math.exp(-z));
 }
+// LOCAL CHANGE (agent committee, phase 1): export the component functions so
+// shared/trading/committee.js can wrap each one as an independent agent.
+// Export-only — scoreAsset() and every component behave exactly as before.
+export {
+  detectRegime,
+  trendComponent,
+  momentumComponent,
+  meanReversionComponent,
+  volumeComponent,
+  supplyDemandComponent,
+  compositeComponent,
+};

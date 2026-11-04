@@ -349,6 +349,9 @@ export const RESET_CLEARS = [
   'SignalOutcome',
   'AIAdvisorInsight',
   'ExchangeBalance',
+  // LOCAL CHANGE: agent committee shadow log. Its legacy_traded flags refer to
+  // trades a reset deletes, so it goes with them.
+  'CommitteeDecision',
 ];
 
 export const RESET_KEEPS = [

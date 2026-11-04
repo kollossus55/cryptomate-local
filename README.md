@@ -40,6 +40,8 @@ The 16 backend functions run **unmodified**. They were written for Deno, so the 
 
 That matters for maintenance: when you change a function in Base44, you can copy the file across and it just works. No porting, no divergence. **One caveat since 2026-10-26:** files carried a small number of `// LOCAL FIX:` patches (bug fixes made locally that the hosted version has not received). Re-copying a file over one of these silently drops the fix — check for the marker, or diff against the D:\cryptomate-backup-20261026 snapshots, before overwriting. The trading-library copies under each function's `shared/` folder are **generated** — edit `/shared/trading/` and run `npm run sync:functions` instead of touching them.
 
+**Agent committee (phase 1, since 2026-11-04):** `autoTradingWorker/entry.ts` carries a `// LOCAL CHANGE:` block that runs the agent committee in **shadow mode** after each cycle's entries and logs what it would have done to the `CommitteeDecision` entity. It never places, blocks or sizes a trade. The logic lives in `shared/trading/committee.js`, synced like the rest of `/shared/trading`. Set `committee.mode` to `"off"` in `AutoTradingSettings` to disable it. Re-copying the worker from Base44 drops this block.
+
 ---
 
 ## How it runs
