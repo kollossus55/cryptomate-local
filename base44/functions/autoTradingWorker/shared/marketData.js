@@ -399,18 +399,64 @@ const MAJORS = new Set([
  * sorted by 24h quote volume descending. Throws on failure — the caller must
  * treat "no market data" as "do not trade".
  */
+// LOCAL CHANGE: stablecoins and fiat. A pegged asset has no trend to trade,
+// yet its huge volume lets it into a volume-ranked universe (USDG, RLUSD were
+// in the live top 20). Any base starting with USD is caught too, so a newly
+// listed USDx stable does not slip in.
+const STABLE_BASES = new Set([
+  'USDC', 'FDUSD', 'TUSD', 'BUSD', 'DAI', 'USDG', 'RLUSD', 'PYUSD', 'USDS',
+  'USD1', 'USAT', 'USDE', 'USDP', 'USDD', 'GUSD', 'EURC', 'EURT', 'EUR', 'GBP', 'AEUR',
+]);
+export function isStableBase(base) {
+  return typeof base === 'string' && (STABLE_BASES.has(base) || /^USD[A-Z0-9]*$/.test(base));
+}
+
+// LOCAL CHANGE: tokenised stocks / ETFs (XAAPL, XGOOGL, ... OKX instCategory 3)
+// and commodities (XAUT, PAXG: category 4) are listed as SPOT USDT pairs but
+// are not crypto. OKX tags every instrument, so read the tag rather than
+// guessing from names (an "X..." rule would also drop XLM, XTZ, XDC).
+// Refreshed daily; if OKX is unreachable the last good set is kept, and the
+// static commodity list still applies (the Coinbase fallback lists no stocks).
+const NON_CRYPTO_STATIC = new Set(['XAUT', 'PAXG']);
+const NON_CRYPTO_TTL_MS = 24 * 3600e3;
+let nonCryptoCache = { at: 0, bases: new Set() };
+
+export async function fetchNonCryptoBases() {
+  if (Date.now() - nonCryptoCache.at < NON_CRYPTO_TTL_MS && nonCryptoCache.bases.size) return nonCryptoCache.bases;
+  try {
+    const data = await fetchJson(`${OKX}/api/v5/public/instruments?instType=SPOT`, { timeoutMs: PROVIDER_TIMEOUT });
+    if (data.code === '0' && Array.isArray(data.data)) {
+      const bases = new Set(
+        data.data
+          .filter((i) => i.instCategory !== undefined && i.instCategory !== '' && String(i.instCategory) !== '1')
+          .map((i) => i.baseCcy)
+          .filter(Boolean)
+      );
+      if (bases.size) nonCryptoCache = { at: Date.now(), bases };
+    }
+  } catch (err) {
+    console.warn(`[marketData] instrument categories unavailable, keeping last known set: ${err.message}`);
+  }
+  return nonCryptoCache.bases;
+}
+
+export function isCryptoBase(base, nonCryptoBases) {
+  return !NON_CRYPTO_STATIC.has(base) && !(nonCryptoBases && nonCryptoBases.has(base));
+}
+
 export async function fetchUniverse({ topN = 60, minQuoteVolume24h = 5_000_000 } = {}) {
   // Provider chain: OKX first, then Coinbase as fallback.
-  const tickers = await withProvider(
-    (provider) => provider.tickers(),
-    'universe tickers'
-  );
+  const [tickers, nonCrypto] = await Promise.all([
+    withProvider((provider) => provider.tickers(), 'universe tickers'),
+    fetchNonCryptoBases(),
+  ]);
 
   return tickers
     // Leveraged tokens (BTCUP/BTCDOWN) and stable-to-stable pairs behave
     // nothing like spot and must not be scored as if they do.
     .filter((t) => !/(UP|DOWN|BULL|BEAR)USDT$/.test(t.symbol))
-    .filter((t) => !/^(USDC|FDUSD|TUSD|BUSD|DAI|EUR|GBP|AEUR)USDT$/.test(t.symbol))
+    .filter((t) => !isStableBase(t.base))
+    .filter((t) => isCryptoBase(t.base, nonCrypto))
     // Exclude major/popular coins — trade altcoins only.
     .filter((t) => !MAJORS.has(t.base))
     .filter((t) => Number.isFinite(t.price) && t.price > 0)

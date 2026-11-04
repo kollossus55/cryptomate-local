@@ -64,9 +64,8 @@ const base = {
 
 console.log(`Fetching ${DAYS}d of ${INTERVAL} candles for top ${TOP} alts + BTC...`);
 const universe = await fetchUniverse({ topN: TOP + 10 });
-// Tokenised stocks/gold (X...) and stablecoins are not altcoins; leave them out here.
-const isAlt = (s) => !/^X[A-Z]{2,}USDT$/.test(s) && !/^(USDG|RLUSD|USDC|FDUSD|DAI|PYUSD|XAUT|PAXG)USDT$/.test(s);
-const symbols = universe.map((u) => u.symbol).filter((s) => s !== 'BTCUSDT' && isAlt(s)).slice(0, TOP);
+// fetchUniverse already drops stablecoins, tokenised stocks and commodities.
+const symbols = universe.map((u) => u.symbol).filter((s) => s !== 'BTCUSDT').slice(0, TOP);
 
 const end = Date.now();
 const start = end - DAYS * 86400e3;

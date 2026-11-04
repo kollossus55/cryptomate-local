@@ -16,6 +16,7 @@ import {
   AGENT_NAMES, LONG_AT, AGAINST_AT,
 } from '../shared/trading/committee.js';
 import { EntityStore } from '../server/entityStore.js';
+import { isStableBase, isCryptoBase } from '../shared/trading/marketData.js';
 import { dedupeDecisions, summarizeFilter, agentScorecard, engineComparison, outcomeSummary } from '../src/lib/committeeStats.js';
 
 let passed = 0, failed = 0;
@@ -486,6 +487,19 @@ test('stats: agent scorecard buckets votes on legacy picks', () => {
 test('stats: engine comparison', () => {
   const e = engineComparison([rec({ symbol: 'L', decision: 'no_quorum', outcome: out('tp') }), rec({ symbol: 'C', legacy_decision: 'skip', decision: 'enter', outcome: out('sl') })]);
   assert.strictEqual(e.legacy.total, 1); assert.strictEqual(e.committee.total, 1); assert.strictEqual(e.committee.winRate, 0);
+});
+
+// --- universe: stablecoins, tokenised stocks, commodities ---------------------
+
+test('universe: stablecoins are excluded, including unknown USDx', () => {
+  for (const b of ['USDC', 'USDG', 'RLUSD', 'PYUSD', 'USD1', 'USDNEW', 'EUR']) assert.ok(isStableBase(b), b);
+  for (const b of ['SUI', 'ENA', 'UNI', 'AAVE']) assert.ok(!isStableBase(b), b);
+});
+test('universe: OKX non-crypto categories and gold are excluded, X-named coins are not', () => {
+  const nonCrypto = new Set(['XGOOGL', 'XAAPL', 'XMSTR']);
+  for (const b of ['XGOOGL', 'XMSTR', 'XAUT', 'PAXG']) assert.ok(!isCryptoBase(b, nonCrypto), b);
+  for (const b of ['XLM', 'XTZ', 'XDC', 'ZEC']) assert.ok(isCryptoBase(b, nonCrypto), b);
+  assert.ok(isCryptoBase('XLM', null), 'no category data = no category filter');
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);
