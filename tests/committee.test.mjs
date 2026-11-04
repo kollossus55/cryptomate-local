@@ -4,12 +4,18 @@
  */
 
 import assert from 'node:assert';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 
 import {
   voteFromScore, coordinate, runCommittee, resolveCommitteeSettings,
   deriveHigherTimeframe, buildContext, shouldLogDecision, toDecisionRecord,
+  marketRegimeAgent, derivativesAgent, liquidityAgent, candlePrePass, buildMarketContext,
+  computeOutcome, outcomeRipeHours,
   AGENT_NAMES, LONG_AT, AGAINST_AT,
 } from '../shared/trading/committee.js';
+import { EntityStore } from '../server/entityStore.js';
 
 let passed = 0, failed = 0;
 const test = (name, fn) => {
@@ -150,7 +156,12 @@ test('derived 4h bars: 200 x 1h -> 50 x 4h, closes line up', () => {
   const htf = deriveHigherTimeframe(uptrend, '1h');
   assert.strictEqual(htf.length, 50);
   assert.strictEqual(htf[htf.length - 1].close, uptrend[uptrend.length - 1].close);
-  assert.strictEqual(deriveHigherTimeframe(uptrend, '15m'), null);
+});
+test('derived 1d bars from 4h: 200 -> 33, unmapped interval -> null', () => {
+  const htf = deriveHigherTimeframe(uptrend, '4h');
+  assert.strictEqual(htf.length, 33);
+  assert.strictEqual(htf[htf.length - 1].close, uptrend[uptrend.length - 1].close);
+  assert.strictEqual(deriveHigherTimeframe(uptrend, '1d'), null);
 });
 test('too few candles returns null', () => {
   assert.strictEqual(runCommittee({ symbol: 'X', candles: uptrend.slice(0, 20) }, {}), null);
@@ -207,6 +218,148 @@ test('decision record carries votes, legacy decision and empty outcome', () => {
   assert.strictEqual(rec.legacy_traded, true);
   assert.strictEqual(rec.outcome, null);
   assert.ok(JSON.stringify(rec)); // serialisable for the JSON entity store
+});
+
+// --- phase 2: context agents ---------------------------------------------------
+
+const S = resolveCommitteeSettings({});
+const ctxWith = (extra, candles = uptrend, interval = '1h') => buildContext({ symbol: 'UPUSDT', candles, interval, ...extra });
+
+test('marketRegime vetoes a sharp BTC drop', () => {
+  const crash = makeCandles(200, { drift: 0.001 });
+  for (let k = 196; k < 200; k++) { crash[k] = { ...crash[k], close: crash[k - 1].close * 0.985 }; }
+  const v = marketRegimeAgent(ctxWith({ market: { btcCandles: crash, breadth: null } }), S);
+  assert.ok(v.veto, 'expected a veto');
+});
+test('marketRegime vetoes weak breadth', () => {
+  const v = marketRegimeAgent(ctxWith({ market: { btcCandles: uptrend, breadth: { above: 2, total: 20, share: 0.1 } } }), S);
+  assert.ok(v.veto);
+});
+test('marketRegime never votes long, even in a strong market', () => {
+  const v = marketRegimeAgent(ctxWith({ market: { btcCandles: uptrend, breadth: { above: 18, total: 20, share: 0.9 } } }), S);
+  assert.strictEqual(v.vote, 'abstain');
+  assert.ok(!v.veto);
+});
+test('marketRegime votes against in a weak market', () => {
+  const v = marketRegimeAgent(ctxWith({ market: { btcCandles: downtrend, breadth: { above: 6, total: 20, share: 0.3 } } }), S);
+  assert.strictEqual(v.vote, 'against');
+});
+test('marketRegime without BTC data is no-data', () => {
+  assert.strictEqual(marketRegimeAgent(ctxWith({}), S).dataOk, false);
+});
+
+const hourly = (n, fn) => Array.from({ length: n }, (_, i) => ({ ts: Date.UTC(2026, 10, 1) + i * 3600e3, value: fn(i) }));
+test('derivatives: not fetched vs no perpetual are both no-data', () => {
+  assert.strictEqual(derivativesAgent(ctxWith({}), S).dataOk, false);
+  assert.strictEqual(derivativesAgent(ctxWith({ derivatives: null }), S).dataOk, false);
+});
+test('derivatives vetoes crowded funding', () => {
+  const v = derivativesAgent(ctxWith({ derivatives: { fundingRate: 0.001, openInterest: [], longShort: [] } }), S);
+  assert.ok(v.veto);
+});
+test('derivatives votes long when OI rises with price', () => {
+  const v = derivativesAgent(ctxWith({ derivatives: { fundingRate: 0.0001, openInterest: hourly(48, (i) => 1e8 * (1 + i * 0.004)), longShort: [] } }), S);
+  assert.strictEqual(v.vote, 'long');
+});
+test('derivatives votes against when OI rises into a falling price', () => {
+  const v = derivativesAgent(ctxWith({ derivatives: { fundingRate: 0.0001, openInterest: hourly(48, (i) => 1e8 * (1 + i * 0.004)), longShort: [] } }, downtrend), S);
+  assert.strictEqual(v.vote, 'against');
+});
+
+const book = (bidDepth, askDepth, spread = 0.0002) => {
+  const mid = 100;
+  const bids = Array.from({ length: 20 }, (_, i) => [mid * (1 - spread / 2 - i * 0.001), bidDepth / 20 / mid]);
+  const asks = Array.from({ length: 20 }, (_, i) => [mid * (1 + spread / 2 + i * 0.001), askDepth / 20 / mid]);
+  return { bids, asks };
+};
+test('liquidity: not fetched is no-data', () => {
+  assert.strictEqual(liquidityAgent(ctxWith({}), S).dataOk, false);
+});
+test('liquidity vetoes a wide spread', () => {
+  assert.ok(liquidityAgent(ctxWith({ orderBook: book(1e6, 1e6, 0.01) }), S).veto);
+});
+test('liquidity vetoes a book that cannot absorb the probe', () => {
+  assert.ok(liquidityAgent(ctxWith({ orderBook: book(1e6, 200) }), S).veto);
+});
+test('liquidity votes long on bid-heavy book, against on ask-heavy, abstains when balanced', () => {
+  assert.strictEqual(liquidityAgent(ctxWith({ orderBook: book(4e6, 1e6) }), S).vote, 'long');
+  assert.strictEqual(liquidityAgent(ctxWith({ orderBook: book(1e6, 4e6) }), S).vote, 'against');
+  assert.strictEqual(liquidityAgent(ctxWith({ orderBook: book(1e6, 1e6) }), S).vote, 'abstain');
+});
+test('a context-agent veto blocks an otherwise unanimous committee', () => {
+  const r = runCommittee({ symbol: 'UPUSDT', candles: uptrend, interval: '1h', orderBook: book(1e6, 1e6, 0.01) }, {});
+  assert.strictEqual(r.decision, 'veto');
+});
+test('candlePrePass counts only candle agents', () => {
+  const p = candlePrePass({ symbol: 'UPUSDT', candles: uptrend, interval: '1h' }, {});
+  assert.ok(p.long >= 2 && p.long <= 4);
+});
+test('buildMarketContext: breadth needs at least 10 assets', () => {
+  const few = new Map([['A', uptrend], ['B', downtrend]]);
+  assert.strictEqual(buildMarketContext(few, uptrend).breadth, null);
+  const many = new Map(Array.from({ length: 10 }, (_, i) => [`S${i}`, i < 7 ? uptrend : downtrend]));
+  assert.strictEqual(buildMarketContext(many, uptrend).breadth.share, 0.7);
+});
+
+// --- phase 2: outcomes -----------------------------------------------------------
+
+const flatBars = (n, price, interval = 3600e3, t0 = Date.UTC(2026, 10, 1)) =>
+  Array.from({ length: n }, (_, i) => ({ openTime: t0 + i * interval, open: price, high: price, low: price, close: price, closeTime: t0 + (i + 1) * interval - 1 }));
+
+test('outcome enters at the next bar open (no look-ahead)', () => {
+  const bars = flatBars(40, 100);
+  bars[5] = { ...bars[5], open: 101, high: 101, low: 101, close: 101 };
+  const o = computeOutcome(bars, bars[4].openTime + 1);
+  assert.strictEqual(o.entry_price, 101);
+});
+test('outcome is null until the window has closed', () => {
+  assert.strictEqual(computeOutcome(flatBars(20, 100), Date.UTC(2026, 10, 1)), null);
+});
+test('stop wins when one bar spans both TP and SL', () => {
+  const bars = flatBars(40, 100);
+  bars[3] = { ...bars[3], high: 120, low: 90 };
+  const o = computeOutcome(bars, bars[0].openTime, { takeProfitPercent: 8, stopLossPercent: 3 });
+  assert.strictEqual(o.first_hit, 'sl');
+  assert.strictEqual(o.bars_to_exit, 4);
+});
+test('take-profit recorded when hit first', () => {
+  const bars = flatBars(40, 100);
+  bars[2] = { ...bars[2], high: 110 };
+  assert.strictEqual(computeOutcome(bars, bars[0].openTime).first_hit, 'tp');
+});
+test('4h outcome: 24 bars = 96h horizon, ret_4h is the first bar', () => {
+  const bars = flatBars(40, 100, 4 * 3600e3);
+  bars[0] = { ...bars[0], close: 102 };
+  const o = computeOutcome(bars, bars[0].openTime, {}, '4h');
+  assert.strictEqual(o.horizon_hours, 96);
+  assert.strictEqual(o.ret_4h, 2);
+  assert.strictEqual(o.ret_24h, 0);
+});
+test('ripeness scales with the interval', () => {
+  assert.strictEqual(outcomeRipeHours('1h'), 25);
+  assert.strictEqual(outcomeRipeHours('4h'), 100);
+});
+
+// --- entity store batch update ---------------------------------------------------
+
+test('bulkUpdate patches many rows in one write and counts unknown ids', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'cm-committee-'));
+  try {
+    const store = new EntityStore(dir);
+    const [a, b] = store.bulkCreate('CommitteeDecision', [{ symbol: 'A', outcome: null }, { symbol: 'B', outcome: null }]);
+    const r = store.bulkUpdate('CommitteeDecision', [
+      { id: a.id, data: { outcome: { ret_24h: 1 } } },
+      { id: b.id, data: { outcome: { ret_24h: -2 }, id: 'hijack' } },
+      { id: 'nope', data: { outcome: {} } },
+    ]);
+    assert.deepStrictEqual(r, { updated: 2, missing: 1 });
+    const reloaded = new EntityStore(dir);
+    assert.strictEqual(reloaded.get('CommitteeDecision', a.id).outcome.ret_24h, 1);
+    assert.strictEqual(reloaded.get('CommitteeDecision', b.id).outcome.ret_24h, -2);
+    assert.strictEqual(reloaded.list('CommitteeDecision', { filter: { outcome: null } }).length, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

@@ -30,7 +30,11 @@
 
 import { scoreAsset, MIN_CANDLES } from './signalEngine.js';
 import { applyCosts } from './costs.js';
-import { atr } from './indicators.js';
+import { atr, atrPercent } from './indicators.js';
+// LOCAL CHANGE (agent committee, phase 2): committee replay mode.
+import { runCommittee, buildMarketContext } from './committee.js';
+
+const INTERVAL_NAMES = { 900_000: '15m', 1_800_000: '30m', 3_600_000: '1h', 14_400_000: '4h', 86_400_000: '1d' };
 
 /**
  * @param {Map<string, Array>} candlesBySymbol  real OHLCV, oldest first
@@ -56,7 +60,20 @@ export function runBacktest(candlesBySymbol, config = {}) {
     // scaled by *24); on any other interval the Sharpe/Sortino and slippage
     // numbers were quietly wrong. Default keeps the old hourly behaviour.
     candleIntervalMs = 3_600_000,
+    // LOCAL CHANGE (agent committee, phase 2): 'legacy' (default, unchanged
+    // behaviour) gates entries on scoreAsset strength; 'committee' gates on
+    // the agent committee's decision. Committee replay sees the same trailing
+    // window the live worker fetches (committeeLookback bars), BTC context
+    // from btcSymbol if it is in the data, and NO derivatives or order book —
+    // there is no honest history for those, so those agents abstain as
+    // no-data. Exits, sizing and costs are identical in both modes.
+    entryEngine = 'legacy',
+    committeeSettings = {},
+    committeeLookback = 200,
+    btcSymbol = 'BTCUSDT',
   } = config;
+  const committeeMode = entryEngine === 'committee';
+  const committeeInterval = INTERVAL_NAMES[candleIntervalMs] || '1h';
 
   const symbols = [...candlesBySymbol.keys()];
   if (symbols.length === 0) {
@@ -247,11 +264,40 @@ export function runBacktest(candlesBySymbol, config = {}) {
     if (positions.size < maxPositions) {
       const candidates = [];
 
+      // Committee mode: the trailing window per symbol, and the market context
+      // built from those same windows — all strictly bars <= t.
+      let windows = null;
+      let market = null;
+      if (committeeMode) {
+        windows = new Map();
+        for (const symbol of symbols) {
+          const idx = indexBySymbol.get(symbol).get(barTime);
+          if (idx === undefined) continue;
+          const candles = candlesBySymbol.get(symbol);
+          windows.set(symbol, candles.slice(Math.max(0, idx + 1 - committeeLookback), idx + 1));
+        }
+        market = buildMarketContext(windows, windows.get(btcSymbol) || null);
+      }
+
       for (const symbol of symbols) {
         if (positions.has(symbol)) continue;
         const candles = candlesBySymbol.get(symbol);
         const idx = indexBySymbol.get(symbol).get(barTime);
         if (idx === undefined || idx < warmupBars) continue;
+
+        if (committeeMode) {
+          if (symbol === btcSymbol) continue; // context, not a candidate — mirrors an altcoin universe
+          const windowCandles = windows.get(symbol);
+          const result = runCommittee({ symbol, candles: windowCandles, interval: committeeInterval, market }, committeeSettings);
+          if (result && result.decision === 'enter') {
+            candidates.push({
+              symbol,
+              signal: { strength: Math.round(result.committeeScore * 100), atrPercent: atrPercent(windowCandles) },
+              visible: windowCandles,
+            });
+          }
+          continue;
+        }
 
         // The critical slice. Only bars up to and including t are visible.
         const visible = candles.slice(0, idx + 1);

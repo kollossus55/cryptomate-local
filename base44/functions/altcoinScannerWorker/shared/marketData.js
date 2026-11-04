@@ -558,3 +558,64 @@ export async function fetchHistoricalCandles(symbol, interval, startTime, endTim
 }
 
 export const _internal = { fetchJson, mapLimit, sleep, INTERVAL_MS };
+// ---------------------------------------------------------------------------
+// LOCAL CHANGE (agent committee, phase 2): OKX perpetual derivatives data.
+// Public endpoints, no keys. Read by the committee's Derivatives agent only.
+// ---------------------------------------------------------------------------
+
+/** OKX publishes OI and long/short stats hourly — no point asking more often. */
+const DERIVATIVES_TTL_MS = 15 * 60_000;
+const derivativesCache = new Map(); // symbol -> { at, value }
+
+/** OKX "rubik" stats allow ~5 requests / 2s per IP; pace calls under that. */
+let rubikNextSlot = 0;
+async function rubikPace() {
+  const now = Date.now();
+  const wait = Math.max(0, rubikNextSlot - now);
+  rubikNextSlot = Math.max(now, rubikNextSlot) + 450;
+  if (wait) await sleep(wait);
+}
+
+/**
+ * Funding rate, 24h+ of hourly open interest (USD) and long/short account
+ * ratio for SYMBOL's USDT perpetual.
+ *
+ * Returns null when OKX lists no perpetual for the asset (the agent abstains)
+ * and throws on transport failure so callers can tell "none" from "unknown".
+ * Series are [{ ts, value }], oldest first.
+ */
+export async function fetchDerivatives(symbol) {
+  const cached = derivativesCache.get(symbol);
+  if (cached && Date.now() - cached.at < DERIVATIVES_TTL_MS) return cached.value;
+
+  if (!symbol.endsWith('USDT')) return null;
+  const base = symbol.slice(0, -4);
+  const instId = `${base}-USDT-SWAP`;
+
+  const funding = await fetchJson(`${OKX}/api/v5/public/funding-rate?instId=${instId}`, { timeoutMs: PROVIDER_TIMEOUT, retries: 1 });
+  // 51001 = instrument does not exist: no perpetual, a definite "none".
+  if (funding.code === '51001' || (funding.code === '0' && !funding.data?.length)) {
+    derivativesCache.set(symbol, { at: Date.now(), value: null });
+    return null;
+  }
+  if (funding.code !== '0') throw new Error(`funding-rate ${funding.code}: ${funding.msg}`);
+  const fundingRate = parseFloat(funding.data[0].fundingRate);
+
+  const toSeries = (rows, col) => (Array.isArray(rows) ? rows : [])
+    .map((r) => ({ ts: Number(r[0]), value: parseFloat(r[col]) }))
+    .filter((p) => Number.isFinite(p.ts) && Number.isFinite(p.value))
+    .sort((a, b) => a.ts - b.ts);
+
+  await rubikPace();
+  const oi = await fetchJson(`${OKX}/api/v5/rubik/stat/contracts/open-interest-volume?ccy=${base}&period=1H`, { timeoutMs: PROVIDER_TIMEOUT, retries: 1 });
+  await rubikPace();
+  const ls = await fetchJson(`${OKX}/api/v5/rubik/stat/contracts/long-short-account-ratio?ccy=${base}&period=1H`, { timeoutMs: PROVIDER_TIMEOUT, retries: 1 });
+
+  const value = {
+    fundingRate: Number.isFinite(fundingRate) ? fundingRate : null,
+    openInterest: oi.code === '0' ? toSeries(oi.data, 1) : [],
+    longShort: ls.code === '0' ? toSeries(ls.data, 1) : [],
+  };
+  derivativesCache.set(symbol, { at: Date.now(), value });
+  return value;
+}

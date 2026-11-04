@@ -190,6 +190,29 @@ export class EntityStore {
     return rows[index];
   }
 
+  /**
+   * LOCAL CHANGE (agent committee): many different patches, ONE file write.
+   * update() rewrites the whole collection file per call, so resolving a
+   * thousand decision outcomes one by one would mean a thousand full rewrites.
+   * Unknown ids are skipped and counted.
+   */
+  bulkUpdate(name, updates) {
+    const rows = [...this._load(name)];
+    const indexById = new Map(rows.map((r, i) => [r.id, i]));
+    const now = new Date().toISOString();
+    let updated = 0;
+    let missing = 0;
+    for (const { id, data } of updates || []) {
+      const i = indexById.get(id);
+      if (i === undefined) { missing++; continue; }
+      const { id: _i, created_date: _c, ...patch } = data || {};
+      rows[i] = { ...rows[i], ...patch, id, updated_date: now };
+      updated++;
+    }
+    if (updated) this._save(name, rows);
+    return { updated, missing };
+  }
+
   updateMany(name, query, data) {
     const rows = [...this._load(name)];
     const now = new Date().toISOString();

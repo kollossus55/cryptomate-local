@@ -47,6 +47,8 @@ export function makeBase44Shim(store, { getRegistry } = {}) {
     bulkCreate: async (rows) => store.bulkCreate(name, rows),
     update: async (id, data) => store.update(name, id, data),
     updateMany: async (query, data) => store.updateMany(name, query, data),
+    // LOCAL CHANGE (agent committee): local-only batch update, one file write.
+    bulkUpdate: async (updates) => store.bulkUpdate(name, updates),
     delete: async (id) => store.delete(name, id),
     deleteMany: async (query) => store.deleteMany(name, query),
   });

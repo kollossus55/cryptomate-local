@@ -2,7 +2,13 @@
 // Copied from /shared/trading by scripts/sync-shared.mjs.
 // Edit the source in /shared/trading and re-run: npm run sync:functions
 /**
- * Agent Committee — phase 1 (shadow mode).
+ * Agent Committee — phases 1-2 (shadow mode).
+ *
+ * Phase 2 adds three context agents that can VETO: Market Regime (BTC trend +
+ * breadth; one-sided, never votes long), Derivatives (OKX funding, open
+ * interest, long/short ratio) and Liquidity (spread, probe-size slippage, book
+ * imbalance). It also adds computeOutcome() for the hourly outcome job and is
+ * replayable through backtest.js (entryEngine: 'committee').
  *
  * Instead of one blended strength score, independent agents each cast a vote
  * (long / against / abstain) with their own reasons, and a coordinator opens a
@@ -37,6 +43,7 @@ import {
   MIN_CANDLES,
 } from './signalEngine.js';
 import { ema } from './indicators.js';
+import { estimateFillFromBook } from './costs.js';
 
 // ---------------------------------------------------------------------------
 // Settings
@@ -61,6 +68,25 @@ export const DEFAULT_COMMITTEE_SETTINGS = Object.freeze({
   weights: {},
   // Per-agent on/off; missing = on.
   agents_enabled: {},
+
+  // --- phase 2: veto thresholds (shape fixed here, values tuned in backtest) ---
+  // Market Regime vetoes when BTC fell this much (%) over the last 4 hours...
+  btc_drop_veto_pct: 3,
+  // ...or when fewer than this share of scanned assets sit above their EMA50.
+  breadth_veto: 0.25,
+  // Derivatives vetoes at this funding rate per 8h (0.0005 = 0.05%, ~5x the
+  // 0.01% baseline): longs are crowded and pay to stay in.
+  funding_veto: 0.0005,
+  // Above this, funding counts against the trade without vetoing it.
+  funding_warn: 0.0003,
+  // Liquidity vetoes above this bid/ask spread (%)...
+  max_spread_pct: 0.3,
+  // ...or when a market buy of this many USDT cannot fill within the
+  // slippage limit. A fixed probe, so the committee never depends on sizing.
+  liquidity_probe_usdt: 1000,
+  // At most this many assets per cycle get the extra OKX calls (derivatives +
+  // order book), best candle pre-pass first. Keeps within OKX rate limits.
+  context_fetch_budget: 40,
 });
 
 /** Days of CommitteeDecision records to keep. */
@@ -76,7 +102,26 @@ export function resolveCommitteeSettings(raw) {
   s.min_eligible = Math.max(1, Math.round(num(s.min_eligible, 3)));
   s.weights = { ...(s.weights || {}) };
   s.agents_enabled = { ...(s.agents_enabled || {}) };
+  const d = DEFAULT_COMMITTEE_SETTINGS;
+  s.btc_drop_veto_pct = Math.max(0, num(s.btc_drop_veto_pct, d.btc_drop_veto_pct));
+  s.breadth_veto = Math.min(1, Math.max(0, num(s.breadth_veto, d.breadth_veto)));
+  s.funding_veto = num(s.funding_veto, d.funding_veto);
+  s.funding_warn = num(s.funding_warn, d.funding_warn);
+  s.max_spread_pct = Math.max(0, num(s.max_spread_pct, d.max_spread_pct));
+  s.liquidity_probe_usdt = Math.max(10, num(s.liquidity_probe_usdt, d.liquidity_probe_usdt));
+  s.context_fetch_budget = Math.max(0, Math.round(num(s.context_fetch_budget, d.context_fetch_budget)));
   return s;
+}
+
+const INTERVAL_HOURS = { '15m': 0.25, '30m': 0.5, '1h': 1, '4h': 4, '1d': 24 };
+
+/** Close price `hours` before the last bar, or null if history is too short. */
+function closeHoursAgo(candles, hours, interval) {
+  const per = INTERVAL_HOURS[interval];
+  if (!per || !Array.isArray(candles)) return null;
+  const bars = Math.round(hours / per);
+  const c = candles[candles.length - 1 - bars];
+  return c && Number.isFinite(c.close) ? c.close : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -135,23 +180,28 @@ export function voteFromScore(agent, score, reasons, extra = {}) {
   return { ...base, vote: 'abstain', confidence: 0 };
 }
 
+/** Base interval -> [higher-timeframe label, bars per HTF bar]. */
+const HTF = { '15m': ['1h', 4], '30m': ['2h', 4], '1h': ['4h', 4], '4h': ['1d', 6] };
+
 /**
- * Derive 4h bars from 1h bars (groups of 4, aligned to the most recent bar).
- * Lets the Trend agent read the higher timeframe with no extra API calls.
- * Returns null for any other base interval.
+ * Derive higher-timeframe bars from the base bars (1h -> 4h, 4h -> 1d, ...),
+ * grouped from the most recent bar backwards. Lets the Trend agent read the
+ * higher timeframe with no extra API calls. Null for an unmapped interval.
  */
 export function deriveHigherTimeframe(candles, interval) {
-  if (interval !== '1h' || !Array.isArray(candles)) return null;
+  const spec = HTF[interval];
+  if (!spec || !Array.isArray(candles)) return null;
+  const n = spec[1];
   const out = [];
-  for (let end = candles.length; end - 4 >= 0; end -= 4) {
-    const group = candles.slice(end - 4, end);
+  for (let end = candles.length; end - n >= 0; end -= n) {
+    const group = candles.slice(end - n, end);
     out.unshift({
       open: group[0].open,
       high: Math.max(...group.map((c) => c.high)),
       low: Math.min(...group.map((c) => c.low)),
-      close: group[3].close,
+      close: group[n - 1].close,
       volume: group.reduce((a, c) => a + (c.volume || 0), 0),
-      closeTime: group[3].closeTime,
+      closeTime: group[n - 1].closeTime,
     });
   }
   return out;
@@ -161,8 +211,35 @@ export function deriveHigherTimeframe(candles, interval) {
 // Context
 // ---------------------------------------------------------------------------
 
-/** Built once per asset per cycle and shared by every agent. */
-export function buildContext({ symbol, candles, interval = '1h' }) {
+/**
+ * Market-wide context, built ONCE per cycle and shared by every asset:
+ * BTC candles plus breadth (share of scanned assets above their EMA50).
+ * Breadth is null with fewer than 10 assets — too few to call it a market.
+ */
+export function buildMarketContext(candlesBySymbol, btcCandles) {
+  let above = 0;
+  let total = 0;
+  for (const candles of candlesBySymbol.values()) {
+    if (!Array.isArray(candles) || candles.length < 50) continue;
+    const e50 = ema(candles.map((c) => c.close), 50);
+    if (e50 === null) continue;
+    total++;
+    if (candles[candles.length - 1].close > e50) above++;
+  }
+  return {
+    btcCandles: Array.isArray(btcCandles) ? btcCandles : null,
+    breadth: total >= 10 ? { above, total, share: round2(above / total) } : null,
+  };
+}
+
+/**
+ * Built once per asset per cycle and shared by every agent.
+ *
+ * `market`, `derivatives` and `orderBook` are optional: undefined means "not
+ * fetched this cycle" and null means "fetched, unavailable". Either way the
+ * agent that needs it abstains as no-data — it never guesses.
+ */
+export function buildContext({ symbol, candles, interval = '1h', market, derivatives, orderBook, limits }) {
   const regime = detectRegime(candles);
   return {
     symbol,
@@ -170,6 +247,10 @@ export function buildContext({ symbol, candles, interval = '1h' }) {
     candles,
     candlesHTF: deriveHigherTimeframe(candles, interval),
     regime,
+    market,
+    derivatives,
+    orderBook,
+    limits: { maxSlippagePercent: 0.5, ...(limits || {}) },
     // The committee's own market label. Phase 2's Market Regime agent (BTC
     // context + breadth) replaces this asset-level reading and adds risk_off.
     marketRegime: regime.regime === 'range' ? 'range' : 'trend',
@@ -181,7 +262,7 @@ export function buildContext({ symbol, candles, interval = '1h' }) {
 // Agents — each: (ctx) => vote. Pure, no I/O.
 // ---------------------------------------------------------------------------
 
-/** Trend: 1h EMA stack, checked against the 4h EMA20. Only counts in a trending market. */
+/** Trend: base-interval EMA stack, checked against the higher timeframe's EMA20 (1h->4h, 4h->1d). Only counts in a trending market. */
 export function trendAgent(ctx) {
   const comp = trendComponent(ctx.candles, ctx.regime);
   if (!comp) return noData('trend', 'EMAs unavailable');
@@ -189,6 +270,7 @@ export function trendAgent(ctx) {
   let score = comp.score;
   const reasons = [...comp.reasons];
   const htf = ctx.candlesHTF;
+  const htfLabel = HTF[ctx.interval]?.[0] || 'HTF';
 
   if (htf && htf.length >= 21) {
     const closes = htf.map((c) => c.close);
@@ -198,17 +280,17 @@ export function trendAgent(ctx) {
     const htfUp = e !== null && ePrev !== null && price > e && e > ePrev;
     const htfDown = e !== null && ePrev !== null && price < e && e < ePrev;
     if (htfUp) {
-      reasons.push('4h: price above rising EMA20');
+      reasons.push(`${htfLabel}: price above rising EMA20`);
       if (score < 50) score = 50 + (score - 50) * 0.3;
     } else if (htfDown) {
-      reasons.push('4h: price below falling EMA20');
+      reasons.push(`${htfLabel}: price below falling EMA20`);
       if (score > 50) score = 50 + (score - 50) * 0.3;
     } else {
-      reasons.push('4h trend mixed');
+      reasons.push(`${htfLabel} trend mixed`);
       score = 50 + (score - 50) * 0.7;
     }
   } else {
-    reasons.push('4h check unavailable');
+    reasons.push('Higher-timeframe check unavailable');
   }
 
   return voteFromScore('trend', score, reasons, { eligibleIn: ['trend'] });
@@ -271,12 +353,208 @@ export function structureAgent(ctx) {
   return voteFromScore('structure', score, [...(sd?.reasons || []), ...(mr?.reasons || [])]);
 }
 
-export const AGENTS = Object.freeze({
+// ---------------------------------------------------------------------------
+// Phase 2 agents — read data beyond the asset's own candles, and can veto.
+// They take settings because their veto thresholds are configurable.
+// ---------------------------------------------------------------------------
+
+/**
+ * Market Regime: BTC trend and market breadth. One market-wide reading, so it
+ * casts the same vote for every asset in a cycle.
+ * Veto: BTC down btc_drop_veto_pct over 4 hours, or breadth below breadth_veto.
+ */
+export function marketRegimeAgent(ctx, s) {
+  const btc = ctx.market?.btcCandles;
+  if (!btc || btc.length < 60) return noData('marketRegime', 'BTC candles unavailable');
+
+  const closes = btc.map((c) => c.close);
+  const price = closes[closes.length - 1];
+  const e20 = ema(closes, 20);
+  const e50 = ema(closes, 50);
+  const back = closeHoursAgo(btc, 4, ctx.interval) ?? closes[closes.length - 2];
+  const chg4 = back ? (price - back) / back : 0;
+  const breadth = ctx.market.breadth;
+  const reasons = [];
+
+  if (chg4 * 100 <= -s.btc_drop_veto_pct) {
+    return {
+      agent: 'marketRegime', vote: 'against', confidence: 1, dataOk: true, score: 0,
+      veto: { reason: `BTC down ${(chg4 * 100).toFixed(1)}% over 4h` },
+      reasons: [`BTC down ${(chg4 * 100).toFixed(1)}% over 4h — risk-off`],
+    };
+  }
+  if (breadth && breadth.share < s.breadth_veto) {
+    return {
+      agent: 'marketRegime', vote: 'against', confidence: 1, dataOk: true, score: 0,
+      veto: { reason: `Breadth ${(breadth.share * 100).toFixed(0)}% above EMA50` },
+      reasons: [`Only ${breadth.above}/${breadth.total} assets above EMA50 — risk-off`],
+    };
+  }
+
+  let score = 50;
+  if (e50 !== null) {
+    if (price > e50) { score += 15; reasons.push('BTC above its EMA50'); }
+    else { score -= 15; reasons.push('BTC below its EMA50'); }
+  }
+  if (e20 !== null && e50 !== null) {
+    if (e20 > e50) { score += 10; reasons.push('BTC EMA20 above EMA50'); }
+    else { score -= 10; reasons.push('BTC EMA20 below EMA50'); }
+  }
+  if (breadth) {
+    const pct = `${(breadth.share * 100).toFixed(0)}%`;
+    if (breadth.share >= 0.6) { score += 15; reasons.push(`Broad market strength: ${pct} above EMA50`); }
+    else if (breadth.share >= 0.5) { score += 5; reasons.push(`Breadth ${pct} above EMA50`); }
+    else if (breadth.share < 0.3) { score -= 20; reasons.push(`Weak breadth: ${pct} above EMA50`); }
+    else if (breadth.share < 0.4) { score -= 15; reasons.push(`Soft breadth: ${pct} above EMA50`); }
+    else reasons.push(`Breadth ${pct} above EMA50`);
+  } else {
+    reasons.push('Breadth unavailable (too few assets)');
+  }
+  // One-sided by design: a strong market is permission to trade alts, not a
+  // reason to buy any particular one. Counting it as a long vote handed every
+  // asset the same free vote in strong markets (seen live: 19/30 would enter
+  // at 76% breadth). So it can restrain (against / veto) but never promote.
+  const v = voteFromScore('marketRegime', score, reasons);
+  if (v.vote === 'long') {
+    return { ...v, vote: 'abstain', confidence: 0, reasons: ['Supportive market — permits, does not vote for any one asset', ...reasons] };
+  }
+  return v;
+}
+
+/**
+ * Derivatives: OKX perpetual funding, open interest and long/short ratio.
+ * The question it answers: is new money backing this move, or is it crowded?
+ * Veto: funding at or above funding_veto (longs crowded and paying for it).
+ */
+export function derivativesAgent(ctx, s) {
+  const d = ctx.derivatives;
+  if (d === undefined) return noData('derivatives', 'Not fetched this cycle');
+  if (d === null) return noData('derivatives', 'No OKX perpetual for this asset');
+
+  const { fundingRate, openInterest, longShort } = d;
+  if (!Number.isFinite(fundingRate) && !(openInterest?.length >= 2)) {
+    return noData('derivatives', 'Derivatives data empty');
+  }
+
+  if (Number.isFinite(fundingRate) && fundingRate >= s.funding_veto) {
+    return {
+      agent: 'derivatives', vote: 'against', confidence: 1, dataOk: true, score: 0,
+      veto: { reason: `Funding ${(fundingRate * 100).toFixed(3)}%/8h — longs crowded` },
+      reasons: [`Funding ${(fundingRate * 100).toFixed(3)}% per 8h — longs crowded`],
+    };
+  }
+
+  const now = ctx.candles[ctx.candles.length - 1].close;
+  const then = closeHoursAgo(ctx.candles, 24, ctx.interval);
+  const priceChg = then ? (now - then) / then : null;
+  const oiChg = changeOver24h(openInterest);
+  const lsChg = changeOver24h(longShort);
+
+  let score = 50;
+  const reasons = [];
+  if (priceChg !== null && oiChg !== null) {
+    const p = `${(priceChg * 100).toFixed(1)}%`;
+    const o = `${(oiChg * 100).toFixed(1)}%`;
+    if (priceChg > 0 && oiChg > 0.02) {
+      score += 10 + Math.min(20, oiChg * 200);
+      reasons.push(`OI ${o} with price ${p} — new money backing the move`);
+    } else if (priceChg > 0 && oiChg < -0.02) {
+      score -= 5;
+      reasons.push(`Price ${p} on falling OI (${o}) — short covering, not new demand`);
+    } else if (priceChg < 0 && oiChg > 0.02) {
+      score -= 20;
+      reasons.push(`OI ${o} into a falling price (${p}) — shorts building`);
+    } else if (priceChg < 0 && oiChg < -0.02) {
+      score -= 5;
+      reasons.push(`Price ${p} with OI ${o} — longs unwinding`);
+    } else {
+      reasons.push(`OI flat (${o}) over 24h`);
+    }
+  }
+  if (Number.isFinite(fundingRate)) {
+    const f = `${(fundingRate * 100).toFixed(3)}%`;
+    if (fundingRate < 0 && priceChg !== null && priceChg > 0) {
+      score += 8;
+      reasons.push(`Negative funding (${f}) into a rally — shorts paying, squeeze fuel`);
+    } else if (fundingRate >= s.funding_warn) {
+      score -= 10;
+      reasons.push(`Funding elevated (${f}/8h)`);
+    } else {
+      reasons.push(`Funding neutral (${f}/8h)`);
+    }
+  }
+  if (lsChg !== null && lsChg > 0.1 && priceChg !== null && priceChg > 0) {
+    score -= 5;
+    reasons.push(`Long/short ratio up ${(lsChg * 100).toFixed(0)}% in 24h — longs piling in`);
+  }
+  return voteFromScore('derivatives', score, reasons);
+}
+
+/** Relative change from the point ~24h before the newest, in a [{ts, value}] series (oldest first). */
+function changeOver24h(series) {
+  if (!Array.isArray(series) || series.length < 2) return null;
+  const latest = series[series.length - 1];
+  const target = latest.ts - 24 * 3600e3;
+  let base = null;
+  for (const p of series) if (p.ts <= target) base = p;
+  if (!base || !base.value) return null;
+  return (latest.value - base.value) / base.value;
+}
+
+/**
+ * Liquidity: can a probe-sized market buy fill cleanly, and which side of the
+ * book is heavier? A healthy book alone is not a reason to buy, so the vote
+ * comes from order-book imbalance within 2% of mid, not from depth itself.
+ * Veto: spread above max_spread_pct, or the probe cannot fill within the
+ * account's slippage limit.
+ */
+export function liquidityAgent(ctx, s) {
+  const b = ctx.orderBook;
+  if (b === undefined) return noData('liquidity', 'Not fetched this cycle');
+  if (!b || !b.bids?.length || !b.asks?.length) return noData('liquidity', 'Order book unavailable');
+
+  const bid = b.bids[0][0];
+  const ask = b.asks[0][0];
+  const mid = (bid + ask) / 2;
+  const spreadPct = mid > 0 ? ((ask - bid) / mid) * 100 : Infinity;
+  const veto = (reason) => ({
+    agent: 'liquidity', vote: 'against', confidence: 1, dataOk: true, score: 0, veto: { reason }, reasons: [reason],
+  });
+
+  if (spreadPct > s.max_spread_pct) return veto(`Spread ${spreadPct.toFixed(2)}% over ${s.max_spread_pct}%`);
+  const fill = estimateFillFromBook(b, 'buy', s.liquidity_probe_usdt);
+  if (!fill || fill.insufficientLiquidity) return veto(`Book cannot absorb a ${s.liquidity_probe_usdt} USDT buy`);
+  if (fill.slippagePercent > ctx.limits.maxSlippagePercent) {
+    return veto(`Slippage ${fill.slippagePercent.toFixed(2)}% on ${s.liquidity_probe_usdt} USDT over ${ctx.limits.maxSlippagePercent}% limit`);
+  }
+
+  const within = (levels, lo, hi) => levels.reduce((a, [p, q]) => (p >= lo && p <= hi ? a + p * q : a), 0);
+  const bidQ = within(b.bids, mid * 0.98, mid);
+  const askQ = within(b.asks, mid, mid * 1.02);
+  const reasons = [`Spread ${spreadPct.toFixed(3)}%, ${s.liquidity_probe_usdt} USDT slips ${fill.slippagePercent.toFixed(3)}%`];
+  if (!(bidQ > 0) || !(askQ > 0)) {
+    return abstain('liquidity', 'Book too shallow within 2% to read imbalance', { reasons });
+  }
+  const ratio = bidQ / askQ;
+  const score = 50 + clamp(Math.log2(ratio) * 20, -30, 30);
+  reasons.push(`Bid/ask depth within 2%: ${ratio.toFixed(2)}x`);
+  return voteFromScore('liquidity', score, reasons);
+}
+
+export const CANDLE_AGENTS = Object.freeze({
   trend: trendAgent,
   momentum: momentumAgent,
   volumeFlow: volumeFlowAgent,
   structure: structureAgent,
 });
+
+export const CONTEXT_AGENTS = Object.freeze({
+  marketRegime: marketRegimeAgent,
+  derivatives: derivativesAgent,
+  liquidity: liquidityAgent,
+});
+
+export const AGENTS = Object.freeze({ ...CANDLE_AGENTS, ...CONTEXT_AGENTS });
 
 export const AGENT_NAMES = Object.keys(AGENTS);
 
@@ -353,22 +631,46 @@ export function coordinate(votes, ctx, rawSettings) {
  * Run every enabled agent on one asset and coordinate. An agent that throws is
  * recorded as a no-data abstain — one broken agent must not sink the cycle.
  */
-export function runCommittee({ symbol, candles, interval = '1h' }, rawSettings) {
+export function runCommittee(input, rawSettings) {
+  const { candles } = input || {};
   if (!Array.isArray(candles) || candles.length < MIN_CANDLES) return null;
   const s = resolveCommitteeSettings(rawSettings);
-  const ctx = buildContext({ symbol, candles, interval });
+  const ctx = buildContext(input);
 
   const votes = [];
   for (const [name, agent] of Object.entries(AGENTS)) {
     if (s.agents_enabled[name] === false) continue;
     try {
-      votes.push(agent(ctx));
+      votes.push(agent(ctx, s));
     } catch (e) {
       votes.push(noData(name, `Agent error: ${e.message}`));
     }
   }
 
-  return { symbol, price: ctx.price, ...coordinate(votes, ctx, s) };
+  return { symbol: input.symbol, price: ctx.price, ...coordinate(votes, ctx, s) };
+}
+
+/**
+ * Cheap first pass: candle agents only, no network. The worker uses the long
+ * count to decide which assets earn the extra OKX calls this cycle.
+ */
+export function candlePrePass({ symbol, candles, interval = '1h' }, rawSettings) {
+  if (!Array.isArray(candles) || candles.length < MIN_CANDLES) return null;
+  const s = resolveCommitteeSettings(rawSettings);
+  const ctx = buildContext({ symbol, candles, interval });
+  let long = 0;
+  let against = 0;
+  for (const [name, agent] of Object.entries(CANDLE_AGENTS)) {
+    if (s.agents_enabled[name] === false) continue;
+    try {
+      const v = agent(ctx, s);
+      const eligible = v.dataOk !== false && (!v.eligibleIn || v.eligibleIn.includes(ctx.marketRegime));
+      if (!eligible) continue;
+      if (v.vote === 'long') long++;
+      else if (v.vote === 'against') against++;
+    } catch { /* counted as no vote */ }
+  }
+  return { symbol, long, against };
 }
 
 // ---------------------------------------------------------------------------
@@ -382,6 +684,72 @@ export function runCommittee({ symbol, candles, interval = '1h' }, rawSettings) 
 export function shouldLogDecision(result, legacyDecision) {
   if (!result) return false;
   return result.longVotes >= 2 || result.decision === 'veto' || legacyDecision === 'enter';
+}
+
+/** Bars of the decision's own interval the outcome window spans (24h on 1h, 96h on 4h). */
+export const OUTCOME_HORIZON_BARS = 24;
+
+/** Hours until a decision on `interval` can be resolved (the window + the entry bar). */
+export function outcomeRipeHours(interval = '1h') {
+  return (INTERVAL_HOURS[interval] || 1) * (OUTCOME_HORIZON_BARS + 1);
+}
+
+/**
+ * Forward outcome of one decision, from candles of the decision's interval
+ * (oldest first).
+ *
+ * Same honesty rules as backtest.js: entry is the OPEN of the first bar that
+ * starts at or after the decision (no look-ahead), and when one bar spans both
+ * take-profit and stop-loss the STOP is assumed to have filled first.
+ * ret_4h / ret_24h are fixed clock horizons; first_hit and the max moves span
+ * OUTCOME_HORIZON_BARS bars (horizon_hours). Null until that window has fully
+ * closed. Returns are gross (before fees and slippage) and in percent.
+ */
+export function computeOutcome(candles, evaluatedAtMs, { takeProfitPercent = 8, stopLossPercent = 3 } = {}, interval = '1h') {
+  if (!Array.isArray(candles) || !Number.isFinite(evaluatedAtMs)) return null;
+  const barHours = INTERVAL_HOURS[interval];
+  if (!barHours) return null;
+  const i0 = candles.findIndex((c) => c.openTime >= evaluatedAtMs);
+  if (i0 === -1 || i0 + OUTCOME_HORIZON_BARS > candles.length) return null;
+
+  const entry = candles[i0].open;
+  if (!(entry > 0)) return null;
+  const window = candles.slice(i0, i0 + OUTCOME_HORIZON_BARS);
+  // Close of the bar that ends `hours` after entry (null if finer than one bar).
+  const closeAfter = (hours) => {
+    const k = Math.round(hours / barHours) - 1;
+    return k >= 0 && k < window.length ? window[k].close : null;
+  };
+  const pct = (p) => round2(((p - entry) / entry) * 100);
+  const tp = entry * (1 + takeProfitPercent / 100);
+  const sl = entry * (1 - stopLossPercent / 100);
+
+  let first = 'neither';
+  let barsToExit = null;
+  for (let k = 0; k < window.length; k++) {
+    const c = window[k];
+    const hitSl = c.low <= sl;
+    const hitTp = c.high >= tp;
+    if (hitSl || hitTp) {
+      first = hitSl ? 'sl' : 'tp';
+      barsToExit = k + 1;
+      break;
+    }
+  }
+
+  return {
+    entry_price: entry,
+    entry_time: new Date(candles[i0].openTime).toISOString(),
+    ret_4h: closeAfter(4) === null ? null : pct(closeAfter(4)),
+    ret_24h: closeAfter(24) === null ? null : pct(closeAfter(24)),
+    horizon_hours: barHours * OUTCOME_HORIZON_BARS,
+    max_up: pct(Math.max(...window.map((c) => c.high))),
+    max_down: pct(Math.min(...window.map((c) => c.low))),
+    first_hit: first,
+    bars_to_exit: barsToExit,
+    take_profit_percent: takeProfitPercent,
+    stop_loss_percent: stopLossPercent,
+  };
 }
 
 /** Shape a committee result into a CommitteeDecision entity record. */

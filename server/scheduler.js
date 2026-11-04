@@ -16,6 +16,9 @@ const JOBS = [
   { name: 'altcoinScan', fn: 'altcoinScannerWorker', everyMinutes: 15 },
   // Matches "Notification Cleanup" — daily
   { name: 'notificationCleanup', fn: 'notificationCleanup', everyMinutes: 1440 },
+  // LOCAL CHANGE (agent committee, phase 2): label shadow decisions with their
+  // 24h forward outcome. Local-only job; no Base44 equivalent.
+  { name: 'committeeOutcomes', fn: 'resolveCommitteeOutcomes', everyMinutes: 60 },
 ];
 
 // ---------------------------------------------------------------------------

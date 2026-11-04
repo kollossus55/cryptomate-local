@@ -1,10 +1,11 @@
 import { createClientFromRequest } from 'npm:@base44/sdk@0.8.43';
 
-import { fetchUniverse, fetchCandlesBatch, fetchOrderBook, fetchPricesForSymbols } from './shared/marketData.js';
+import { fetchUniverse, fetchCandlesBatch, fetchOrderBook, fetchPricesForSymbols, fetchCandles, fetchDerivatives } from './shared/marketData.js';
 import { scoreAsset, MIN_CANDLES } from './shared/signalEngine.js';
-// LOCAL CHANGE: agent committee, phase 1 (shadow logging only).
+// LOCAL CHANGE: agent committee, phases 1-2 (shadow logging only).
 import {
-  runCommittee, resolveCommitteeSettings, shouldLogDecision, toDecisionRecord, COMMITTEE_RETENTION_DAYS,
+  runCommittee, candlePrePass, buildMarketContext, resolveCommitteeSettings,
+  shouldLogDecision, toDecisionRecord, COMMITTEE_RETENTION_DAYS,
 } from './shared/committee.js';
 import { applyCosts, roundTripCostPercent, isEdgeSufficient } from './shared/costs.js';
 import { calculatePositionSize, checkCorrelation, buildReturnsMap, checkPortfolioExposure } from './shared/sizing.js';
@@ -1029,14 +1030,52 @@ async function runTradingCycle({ base44, settings, portfolio, user_email, log, n
           let evaluated = 0;
           let wouldEnter = 0;
 
+          // Phase 2: market-wide context once per cycle (BTC + breadth).
+          const btcCandles = candlesBySymbol.get('BTCUSDT')
+            || await fetchCandles('BTCUSDT', candleInterval, CANDLE_LIMIT).catch(() => null);
+          const market = buildMarketContext(candlesBySymbol, btcCandles);
+
+          // Who is evaluated this cycle, and the cheap candle-only pre-pass.
+          const pool = [];
           for (const ticker of candidateTickers) {
             const symbol = ticker.symbol;
             if (heldNow.includes(symbol)) continue;
             if (counters.assets_traded_today.includes(symbol) && !boughtNow.has(symbol)) continue;
             const candles = candlesBySymbol.get(symbol);
             if (!candles || candles.length < MIN_CANDLES) continue;
+            const pre = candlePrePass({ symbol, candles, interval: candleInterval }, committeeSettings);
+            pool.push({ symbol, candles, preLong: pre?.long ?? 0 });
+          }
 
-            const result = runCommittee({ symbol, candles, interval: candleInterval }, committeeSettings);
+          // The extra OKX calls (derivatives + order book) go to the best
+          // pre-pass assets only, within the fetch budget. Everyone else gets
+          // "not fetched" for those agents, which counts as no vote.
+          const fetchSet = pool
+            .filter((p) => p.preLong >= 2)
+            .sort((a, b) => b.preLong - a.preLong)
+            .slice(0, committeeSettings.context_fetch_budget);
+          const extras = new Map();
+          const runPool = async (items, limit, fn) => {
+            let i = 0;
+            await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+              while (i < items.length) { const item = items[i++]; await fn(item); }
+            }));
+          };
+          await runPool(fetchSet, 3, async (p) => {
+            const [derivatives, orderBook] = await Promise.all([
+              fetchDerivatives(p.symbol).catch(() => undefined),   // transport failure = unknown, not "none"
+              fetchOrderBook(p.symbol, 100).catch(() => null),
+            ]);
+            extras.set(p.symbol, { derivatives, orderBook });
+          });
+          const limits = { maxSlippagePercent: settings.max_slippage_percent ?? 0.5 };
+
+          for (const { symbol, candles } of pool) {
+            const extra = extras.get(symbol) || {};
+            const result = runCommittee({
+              symbol, candles, interval: candleInterval, market, limits,
+              derivatives: extra.derivatives, orderBook: extra.orderBook,
+            }, committeeSettings);
             if (!result) continue;
             evaluated++;
             if (result.decision === 'enter') wouldEnter++;
@@ -1061,8 +1100,10 @@ async function runTradingCycle({ base44, settings, portfolio, user_email, log, n
           }
           const cutoff = new Date(now.getTime() - COMMITTEE_RETENTION_DAYS * 864e5).toISOString();
           await base44.asServiceRole.entities.CommitteeDecision.deleteMany({ evaluated_at: { $lt: cutoff } });
-          log(`Committee (shadow): ${evaluated} evaluated, ${wouldEnter} would enter, ` +
-              `legacy entered ${legacyEnter.size}, ${records.length} logged`);
+          const vetoed = records.filter((r) => r.decision === 'veto').length;
+          log(`Committee (shadow): ${evaluated} evaluated, ${wouldEnter} would enter, ${vetoed} vetoed, ` +
+              `legacy entered ${legacyEnter.size}, context fetched for ${extras.size}, ${records.length} logged` +
+              (market.breadth ? `, breadth ${(market.breadth.share * 100).toFixed(0)}%` : ''));
         }
       } catch (e) {
         log(`Committee shadow run failed (trading unaffected): ${e.message}`);
