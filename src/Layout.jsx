@@ -2,7 +2,7 @@ import React, { useState, useEffect } from "react";
 import { Link } from "react-router-dom";
 import { createPageUrl } from "./components/utils";
 import { base44 } from "@/api/base44Client";
-import { TrendingUp, History, Settings, LogOut, User, Sparkles, Bell, Shield, Activity, Brain, Target, Scan, Cpu, Lock, Users } from "lucide-react";
+import { TrendingUp, History, Settings, LogOut, User, Sparkles, Bell, Shield, Activity, Brain, Target, Scan, Cpu, Lock, Users, FlaskConical } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -83,6 +83,7 @@ export default function Layout({ children, currentPageName }) {
     { name: "AI Insights", path: "Insights", icon: Activity },
     { name: "Backtesting", path: "Backtesting", icon: Activity },
     { name: "Committee", path: "Committee", icon: Users }, // LOCAL CHANGE: agent committee, phase 3
+    { name: "Strategy Lab", path: "StrategyLab", icon: FlaskConical }, // LOCAL CHANGE: strategy lab
     { name: "Alerts", path: "Alerts", icon: Bell },
     { name: "Trade History", path: "TradeHistory", icon: History },
     { name: "Exchange Settings", path: "ExchangeSettings", icon: Settings },

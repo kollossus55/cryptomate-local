@@ -20,7 +20,7 @@ import { fileURLToPath } from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SRC = path.join(ROOT, 'shared', 'trading');
 
-const FUNCTION_DIRS = ['autoTradingWorker', 'altcoinScannerWorker', 'technicalAnalysis', 'resolveCommitteeOutcomes'];
+const FUNCTION_DIRS = ['autoTradingWorker', 'altcoinScannerWorker', 'technicalAnalysis', 'resolveCommitteeOutcomes', 'strategyLabWorker'];
 
 const header =
   '// GENERATED FILE — DO NOT EDIT.\n' +

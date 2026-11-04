@@ -53,6 +53,7 @@ import Alerts from './pages/Alerts';
 import AutoTrading from './pages/AutoTrading';
 import Backtesting from './pages/Backtesting';
 import Committee from './pages/Committee'; // LOCAL CHANGE: agent committee, phase 3
+import StrategyLab from './pages/StrategyLab'; // LOCAL CHANGE: strategy lab
 import ExchangeSettings from './pages/ExchangeSettings';
 import Home from './pages/Home';
 import Insights from './pages/Insights';
@@ -69,6 +70,7 @@ export const PAGES = {
     "AutoTrading": AutoTrading,
     "Backtesting": Backtesting,
     "Committee": Committee,
+    "StrategyLab": StrategyLab,
     "ExchangeSettings": ExchangeSettings,
     "Home": Home,
     "Insights": Insights,

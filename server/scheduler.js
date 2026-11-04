@@ -19,6 +19,10 @@ const JOBS = [
   // LOCAL CHANGE (agent committee, phase 2): label shadow decisions with their
   // 24h forward outcome. Local-only job; no Base44 equivalent.
   { name: 'committeeOutcomes', fn: 'resolveCommitteeOutcomes', everyMinutes: 60 },
+  // LOCAL CHANGE (strategy lab): two daily paper strategies in their own
+  // virtual accounts. Hourly: marks equity and checks stops; daily decisions
+  // run once per closed OKX daily candle (16:00 UTC). Local-only job.
+  { name: 'strategyLab', fn: 'strategyLabWorker', everyMinutes: 60 },
 ];
 
 // ---------------------------------------------------------------------------

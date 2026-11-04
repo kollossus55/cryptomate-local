@@ -387,6 +387,10 @@ export const RESET_KEEPS = [
   'BacktestResult',
   'PriceAlert',
   'User',
+  // LOCAL CHANGE (strategy lab): separate virtual accounts, not the paper
+  // portfolio — a main-account reset leaves the lab's track record running.
+  'StrategyLabAccount',
+  'StrategyLabTrade',
 ];
 
 export function resetTradingData(store, { startingBalance = 10000, log } = {}) {
