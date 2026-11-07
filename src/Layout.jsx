@@ -2,7 +2,7 @@ import React, { useState, useEffect } from "react";
 import { Link } from "react-router-dom";
 import { createPageUrl } from "./components/utils";
 import { base44 } from "@/api/base44Client";
-import { TrendingUp, History, Settings, LogOut, User, Sparkles, Bell, Shield, Activity, Brain, Target, Scan, Cpu, Lock, Users, FlaskConical } from "lucide-react";
+import { TrendingUp, History, LogOut, User, Sparkles, Bell, Shield, Activity, Brain, Target, Scan, Cpu, Lock, Users, FlaskConical, Gauge, Layers, ListChecks, ShieldAlert, Network, KeyRound, ChevronDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -12,12 +12,69 @@ import {
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
 import { Badge } from "@/components/ui/badge";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import NotificationCenter from "./components/notifications/NotificationCenter";
+import LegacyBanner from "./components/LegacyBanner";
+import { PaperBanner, useV6Status } from "@/components/v6/shared";
+
+const NAV_GROUPS = [
+  { label: "V6", items: [
+    { name: "Mission Control", path: "MissionControl", icon: Gauge },
+    { name: "Strategies", path: "Strategies", icon: Layers },
+    { name: "Signal Tests", path: "SignalTests", icon: ListChecks },
+    { name: "Risk Controls", path: "RiskControls", icon: ShieldAlert },
+    { name: "Exchanges", path: "Exchanges", icon: Network },
+  ]},
+  { label: "Records", items: [
+    { name: "Trade History", path: "TradeHistory", icon: History },
+    { name: "Alerts", path: "Alerts", icon: Bell },
+  ]},
+  { label: "Account", items: [
+    { name: "Security", path: "Security", icon: Lock },
+  ]},
+  { label: "Legacy", collapsible: true, items: [
+    { name: "Trading", path: "Trading", icon: TrendingUp },
+    { name: "Auto-Trading", path: "AutoTrading", icon: Sparkles },
+    { name: "Trade Signals", path: "TradeSignals", icon: Target },
+    { name: "Altcoin Scanner", path: "AltcoinScanner", icon: Scan },
+    { name: "AI Signals", path: "AISignals", icon: Brain },
+    { name: "AI Insights", path: "Insights", icon: Activity },
+    { name: "Backtesting", path: "Backtesting", icon: Activity },
+    { name: "Committee", path: "Committee", icon: Users },
+    { name: "Strategy Lab", path: "StrategyLab", icon: FlaskConical },
+    { name: "API Keys (live only)", path: "ExchangeSettings", icon: KeyRound },
+    { name: "AI Settings", path: "AISettings", icon: Cpu },
+  ]},
+];
+
+const LEGACY_PAGES = NAV_GROUPS.find((g) => g.collapsible).items.map((i) => i.path);
+const LEGACY_OPEN_KEY = "cryptomate.legacyNavOpen";
+
+const readLegacyOpen = () => {
+  try { return localStorage.getItem(LEGACY_OPEN_KEY) === "1"; } catch { return false; }
+};
+const writeLegacyOpen = (open) => {
+  try { localStorage.setItem(LEGACY_OPEN_KEY, open ? "1" : "0"); } catch { /* best effort */ }
+};
+
+// Its own component: Layout returns early before sign-in, and the status query must not.
+function AlarmDot() {
+  const { data } = useV6Status();
+  const critical = data?.alarms?.critical ?? 0;
+  if (critical <= 0) return null;
+  return (
+    <span className="ml-auto flex items-center gap-1 rounded-full bg-red-600 px-2 text-xs font-semibold text-white">
+      {critical}
+      <span className="sr-only">critical {critical === 1 ? "alarm" : "alarms"}</span>
+    </span>
+  );
+}
 
 export default function Layout({ children, currentPageName }) {
   const [user, setUser] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [legacyOpen, setLegacyOpen] = useState(readLegacyOpen);
 
   useEffect(() => {
     loadUser();
@@ -74,27 +131,41 @@ export default function Layout({ children, currentPageName }) {
     return null;
   }
 
-  const navItems = [
-    { name: "Trading", path: "Trading", icon: TrendingUp },
-    { name: "Auto-Trading", path: "AutoTrading", icon: Sparkles },
-    { name: "Trade Signals", path: "TradeSignals", icon: Target },
-    { name: "Altcoin Scanner", path: "AltcoinScanner", icon: Scan },
-    { name: "AI Signals", path: "AISignals", icon: Brain },
-    { name: "AI Insights", path: "Insights", icon: Activity },
-    { name: "Backtesting", path: "Backtesting", icon: Activity },
-    { name: "Committee", path: "Committee", icon: Users }, // LOCAL CHANGE: agent committee, phase 3
-    { name: "Strategy Lab", path: "StrategyLab", icon: FlaskConical }, // LOCAL CHANGE: strategy lab
-    { name: "Alerts", path: "Alerts", icon: Bell },
-    { name: "Trade History", path: "TradeHistory", icon: History },
-    { name: "Exchange Settings", path: "ExchangeSettings", icon: Settings },
-    { name: "AI Settings", path: "AISettings", icon: Cpu },
-    { name: "Security", path: "Security", icon: Lock }
-  ];
+  const groups = NAV_GROUPS.map((group) => (
+    group.label === "Account" && user?.role === 'admin'
+      ? { ...group, items: [...group.items, { name: "Admin", path: "AdminDashboard", icon: Shield }] }
+      : group
+  ));
 
-  // Add admin dashboard to nav if user is admin
-  if (user?.role === 'admin') {
-    navItems.push({ name: "Admin", path: "AdminDashboard", icon: Shield });
-  }
+  const renderLink = (item) => {
+    const Icon = item.icon;
+    const isActive = currentPageName === item.path;
+    const isAdmin = item.path === 'AdminDashboard';
+
+    return (
+      <Link
+        key={item.path}
+        to={createPageUrl(item.path)}
+        onClick={() => setMobileOpen(false)}
+        className={`px-3 py-2.5 rounded-xl transition-all duration-300 flex items-center gap-3 text-sm ${
+          isActive
+            ? isAdmin
+              ? 'bg-red-600 text-white'
+              : 'bg-indigo-600 text-white'
+            : isAdmin
+            ? 'text-red-400 hover:text-white hover:bg-red-600/20'
+            : 'text-slate-400 hover:text-white hover:bg-slate-800'
+        }`}
+      >
+        <Icon className="w-4 h-4 flex-shrink-0" />
+        <span>{item.name}</span>
+        {item.path === 'MissionControl' && <AlarmDot />}
+      </Link>
+    );
+  };
+
+  const groupLabelCls = "px-3 pt-4 pb-1 text-[10px] uppercase tracking-wider text-slate-500";
+  const legacyShown = legacyOpen || LEGACY_PAGES.includes(currentPageName);
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 flex">
@@ -106,7 +177,7 @@ export default function Layout({ children, currentPageName }) {
       >
         {/* Logo */}
         <Link
-          to={createPageUrl('Trading')}
+          to={createPageUrl('MissionControl')}
           className="flex items-center gap-3 px-5 h-16 border-b border-slate-800 flex-shrink-0"
           onClick={() => setMobileOpen(false)}
         >
@@ -119,37 +190,34 @@ export default function Layout({ children, currentPageName }) {
           </div>
           <div className="flex flex-col">
             <span className="text-white font-semibold leading-tight">CryptoMate</span>
-            <span className="text-[10px] text-slate-400 leading-tight">Your Crypto Trading Assistant</span>
+            <span className="text-[10px] text-slate-400 leading-tight">V6 paper engine</span>
           </div>
         </Link>
 
         {/* Navigation Links */}
-        <nav className="flex-1 overflow-y-auto px-3 py-4 space-y-1">
-          {navItems.map((item) => {
-            const Icon = item.icon;
-            const isActive = currentPageName === item.path;
-            const isAdmin = item.path === 'AdminDashboard';
-
-            return (
-              <Link
-                key={item.path}
-                to={createPageUrl(item.path)}
-                onClick={() => setMobileOpen(false)}
-                className={`px-3 py-2.5 rounded-xl transition-all duration-300 flex items-center gap-3 text-sm ${
-                  isActive
-                    ? isAdmin
-                      ? 'bg-red-600 text-white'
-                      : 'bg-indigo-600 text-white'
-                    : isAdmin
-                    ? 'text-red-400 hover:text-white hover:bg-red-600/20'
-                    : 'text-slate-400 hover:text-white hover:bg-slate-800'
-                }`}
+        <nav className="flex-1 overflow-y-auto px-3 pb-4 space-y-1">
+          {groups.map((group) => (
+            group.collapsible ? (
+              <Collapsible
+                key={group.label}
+                open={legacyShown}
+                onOpenChange={(open) => { setLegacyOpen(open); writeLegacyOpen(open); }}
               >
-                <Icon className="w-4 h-4 flex-shrink-0" />
-                <span>{item.name}</span>
-              </Link>
-            );
-          })}
+                <CollapsibleTrigger className={`${groupLabelCls} flex w-full items-center justify-between hover:text-slate-300`}>
+                  {group.label}
+                  <ChevronDown className={`w-3 h-3 transition-transform ${legacyShown ? 'rotate-180' : ''}`} aria-hidden="true" />
+                </CollapsibleTrigger>
+                <CollapsibleContent className="space-y-1">
+                  {group.items.map(renderLink)}
+                </CollapsibleContent>
+              </Collapsible>
+            ) : (
+              <div key={group.label} className="space-y-1">
+                <p className={groupLabelCls}>{group.label}</p>
+                {group.items.map(renderLink)}
+              </div>
+            )
+          ))}
         </nav>
 
         {/* Bottom: Notifications + User Menu */}
@@ -225,7 +293,7 @@ export default function Layout({ children, currentPageName }) {
               <line x1="3" y1="18" x2="21" y2="18" />
             </svg>
           </button>
-          <Link to={createPageUrl('Trading')} className="flex items-center gap-2">
+          <Link to={createPageUrl('MissionControl')} className="flex items-center gap-2">
             <div className="w-8 h-8 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-xl flex items-center justify-center">
               <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M12 2L2 7l10 5 10-5-10-5z"></path>
@@ -239,6 +307,8 @@ export default function Layout({ children, currentPageName }) {
         </div>
 
         {/* Main Content */}
+        <PaperBanner />
+        {LEGACY_PAGES.includes(currentPageName) && <LegacyBanner page={currentPageName} />}
         <main className="flex-1">{children}</main>
 
         {/* Footer Disclaimer */}
@@ -248,8 +318,8 @@ export default function Layout({ children, currentPageName }) {
               <div className="max-w-2xl">
                 <div className="max-w-2xl space-y-2">
                   <p className="text-slate-400 text-sm leading-relaxed">
-                    <strong className="text-slate-300">Demo Platform with Live Trading:</strong> CryptoMate runs in paper-trading mode by default using virtual funds.
-                    When you connect a supported exchange and enable live trading, the platform can place real orders on your behalf using your own exchange account and funds.
+                    <strong className="text-slate-300">V6 is paper only.</strong> It uses virtual funds and has no way to place real orders.
+                    The legacy live-trading path is separate and stays off unless you arm it.
                   </p>
                   <p className="text-slate-500 text-xs leading-relaxed">
                     <strong className="text-slate-400">Risk Disclaimer:</strong> Trading cryptocurrencies and digital assets carries a high level of risk and may result in the loss of your entire investment.

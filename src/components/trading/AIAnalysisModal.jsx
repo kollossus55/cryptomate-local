@@ -240,7 +240,7 @@ export default function AIAnalysisModal({ isOpen, onClose, asset }) {
                   <div className="bg-slate-800 rounded-xl p-4 border border-slate-700">
                     <div className="flex items-center gap-2 mb-2">
                       <Target className="w-4 h-4 text-slate-400" />
-                      <span className="text-slate-400 text-sm">Confidence</span>
+                      <span className="text-slate-400 text-sm">Model score (not a probability)</span>
                     </div>
                     <div className="text-xl font-bold text-white">
                       {analysis.confidence}/100

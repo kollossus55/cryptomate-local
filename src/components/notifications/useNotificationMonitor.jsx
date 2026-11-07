@@ -1,6 +1,7 @@
 /**
- * Custom hook for monitoring and triggering notifications
- * This simulates what backend functions would do automatically
+ * Custom hook for monitoring and triggering notifications.
+ * Runs in the browser, and only on pages that mount it (the legacy Trading page).
+ * Every notification here comes from a value in `assets`: never a random draw.
  */
 import { useEffect, useRef, useState } from 'react';
 import { base44 } from '@/api/base44Client';
@@ -10,6 +11,7 @@ export function useNotificationMonitor(assets = []) {
   const [activeToast, setActiveToast] = useState(null);
   const lastCheckTime = useRef(Date.now());
   const priceHistory = useRef({});
+  const volumeBaseline = useRef({});
 
   const { data: alerts = [] } = useQuery({
     queryKey: ['price-alerts'],
@@ -81,18 +83,26 @@ export function useNotificationMonitor(assets = []) {
               break;
             
             case 'volume_spike':
-              // Very low frequency check
-              if (Math.random() > 0.995) {
-                shouldTrigger = true;
-                message = `Unusual volume spike detected for ${alert.asset_symbol}`;
+              // A rolling 24h figure barely moves between checks, so compare with
+              // the first reading since monitoring began, not the previous one.
+              if (Number.isFinite(asset.volume24h) && asset.volume24h > 0) {
+                const baseline = volumeBaseline.current[alert.asset_symbol];
+                if (!baseline) {
+                  volumeBaseline.current[alert.asset_symbol] = asset.volume24h;
+                } else {
+                  const increasePercent = ((asset.volume24h - baseline) / baseline) * 100;
+                  if (increasePercent >= threshold) {
+                    shouldTrigger = true;
+                    message = `${alert.asset_symbol} 24h volume is up ${increasePercent.toFixed(1)}% since monitoring began (threshold: ${threshold}%)`;
+                  }
+                }
               }
               break;
             
             case 'volatility':
-              // Very low frequency check
-              if (Math.random() > 0.99) {
+              if (Number.isFinite(asset.change24h) && Math.abs(asset.change24h) >= threshold) {
                 shouldTrigger = true;
-                message = `High volatility detected for ${alert.asset_symbol}`;
+                message = `${alert.asset_symbol} moved ${asset.change24h.toFixed(2)}% in 24h (threshold: ${threshold}%)`;
               }
               break;
           }
@@ -172,11 +182,12 @@ export function useNotificationMonitor(assets = []) {
           }
 
           const notification = {
-            notification_type: 'ai_anomaly',
+            notification_type: 'system',
             priority: Math.abs(newsData.sentiment_score) > 0.7 ? 'urgent' : 'high',
-            title: `📰 Breaking News: ${asset.symbol}`,
+            title: `News: ${asset.symbol}`,
             message: `${newsData.sentiment_label.replace('_', ' ').toUpperCase()} sentiment detected. ${newsData.key_headlines?.[0] || 'Significant news event.'}`,
             data: {
+              source: 'news_web_search',
               asset: asset.symbol,
               news_sentiment: newsData.sentiment_label,
               sentiment_score: newsData.sentiment_score,

@@ -60,6 +60,11 @@ import Insights from './pages/Insights';
 import TradeHistory from './pages/TradeHistory';
 import Security from './pages/Security';
 import Trading from './pages/Trading';
+import MissionControl from './pages/MissionControl';
+import Strategies from './pages/Strategies';
+import SignalTests from './pages/SignalTests';
+import RiskControls from './pages/RiskControls';
+import Exchanges from './pages/Exchanges';
 import __Layout from './Layout.jsx';
 
 
@@ -77,6 +82,11 @@ export const PAGES = {
     "TradeHistory": TradeHistory,
     "Security": Security,
     "Trading": Trading,
+    "MissionControl": MissionControl,
+    "Strategies": Strategies,
+    "SignalTests": SignalTests,
+    "RiskControls": RiskControls,
+    "Exchanges": Exchanges,
 }
 
 export const pagesConfig = {

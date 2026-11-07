@@ -17,8 +17,8 @@ export default function Home() {
       const authenticated = await base44.auth.isAuthenticated();
       setIsAuthenticated(authenticated);
       if (authenticated) {
-        // Redirect to trading page if already logged in
-        window.location.href = createPageUrl('Trading');
+        // Signed in: Mission Control is the first stop
+        window.location.href = createPageUrl('MissionControl');
       }
     } catch (error) {
       console.error("Auth check failed:", error);
@@ -30,11 +30,11 @@ export default function Home() {
   const handleLogin = () => {
     try {
       // Redirect to login with next URL
-      base44.auth.redirectToLogin(createPageUrl('Trading'));
+      base44.auth.redirectToLogin(createPageUrl('MissionControl'));
     } catch (error) {
       console.error("Login redirect failed:", error);
       // Fallback: try direct navigation
-      window.location.href = '/login?next=' + encodeURIComponent(createPageUrl('Trading'));
+      window.location.href = '/login?next=' + encodeURIComponent(createPageUrl('MissionControl'));
     }
   };
 
@@ -89,20 +89,20 @@ export default function Home() {
               <div className="bg-indigo-500/10 border border-indigo-500/30 rounded-full px-6 py-2">
                 <div className="flex items-center gap-2 text-sm font-medium">
                   <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
-                  <span className="text-indigo-300">Indicator-Led Trading Platform • Paper Trading Demo</span>
+                  <span className="text-indigo-300">Paper trading research platform</span>
                 </div>
               </div>
             </div>
 
             <h1 className="text-6xl md:text-7xl lg:text-8xl font-bold mb-6 leading-tight">
-              <span className="block text-white">Trade Crypto with</span>
+              <span className="block text-white">Test crypto strategies</span>
               <span className="block bg-gradient-to-r from-indigo-400 to-purple-400 bg-clip-text text-transparent">
-                Indicator Intelligence
+                before they trade
               </span>
             </h1>
 
             <p className="text-xl text-slate-400 mb-10 max-w-3xl mx-auto leading-relaxed">
-              Leverage real-time exchange market data, technical indicators, and strategy-led signals to trade the top 20 cryptocurrencies with confidence.
+              Strategies must pass fixed tests on past data, net of costs, before they can paper trade. If none passes, the bot stays in cash and tells you why.
             </p>
 
             <div className="flex flex-col sm:flex-row gap-4 justify-center mb-12">
@@ -111,7 +111,7 @@ export default function Home() {
                 size="lg"
                 className="bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 text-lg px-8 py-6"
               >
-                Get Started Free
+                Sign In
                 <ArrowRight className="w-5 h-5 ml-2" />
               </Button>
               <Button 
@@ -120,7 +120,7 @@ export default function Home() {
                 className="border-indigo-500 text-indigo-400 hover:bg-indigo-500/10 hover:border-indigo-400 text-lg px-8 py-6"
                 onClick={handleLogin}
               >
-                Try Demo Now
+                Open Mission Control
               </Button>
             </div>
 
@@ -128,15 +128,15 @@ export default function Home() {
             <div className="flex flex-wrap justify-center gap-8 text-sm text-slate-400">
               <div className="flex items-center gap-2">
                 <CheckCircle className="w-4 h-4 text-green-400" />
-                <span>No credit card required</span>
+                <span>Runs on your own machine</span>
               </div>
               <div className="flex items-center gap-2">
                 <CheckCircle className="w-4 h-4 text-green-400" />
-                <span>Free forever plan</span>
+                <span>Paper money only in V6</span>
               </div>
               <div className="flex items-center gap-2">
                 <CheckCircle className="w-4 h-4 text-green-400" />
-                <span>Setup in 2 minutes</span>
+                <span>Costs included in every test</span>
               </div>
             </div>
 
@@ -147,11 +147,10 @@ export default function Home() {
                   <AlertCircle className="w-5 h-5 text-blue-400" />
                 </div>
                 <div className="text-left">
-                  <h3 className="font-semibold text-blue-200 mb-2">Paper Trading Demo Platform</h3>
+                  <h3 className="font-semibold text-blue-200 mb-2">Paper trading research platform</h3>
                   <p className="text-blue-200/80 text-sm leading-relaxed">
-                    This platform provides a <strong>risk-free trading simulation</strong> with live cryptocurrency prices. 
-                    You start with <strong>$10,000 virtual funds</strong> to practice trading strategies without any financial risk. 
-                    All trades are simulated - <strong>no real money is involved</strong>. Exchange integrations and auto-trading features are for demonstration purposes only.
+                    <strong>V6 is paper only, with virtual funds.</strong> Past results do not predict future ones.
+                    A separate legacy live-trading feature exists and is off unless you arm it.
                   </p>
                 </div>
               </div>
@@ -214,7 +213,7 @@ export default function Home() {
               </div>
               <h3 className="text-2xl font-bold text-white mb-4">Real-Time Alerts</h3>
               <p className="text-slate-400 leading-relaxed mb-6">
-                Set custom price alerts, receive order notifications, and get AI-driven anomaly detection alerts for unusual market activity.
+                Set custom price alerts and receive order notifications. Every alert comes from a recorded event.
               </p>
               <ul className="space-y-2">
                 <li className="flex items-center gap-2 text-slate-300">
@@ -227,7 +226,7 @@ export default function Home() {
                 </li>
                 <li className="flex items-center gap-2 text-slate-300">
                   <CheckCircle className="w-4 h-4 text-green-400" />
-                  <span>AI anomaly detection</span>
+                  <span>Volume and volatility alerts</span>
                 </li>
               </ul>
             </div>
@@ -257,10 +256,10 @@ export default function Home() {
           <div className="mt-20 text-center">
             <div className="bg-gradient-to-br from-indigo-900 to-purple-900 border border-indigo-500/50 rounded-3xl p-12">
               <h2 className="text-4xl font-bold text-white mb-4">
-                Start Trading Smarter Today
+                See what passed, and what did not
               </h2>
               <p className="text-indigo-200 text-lg mb-8 max-w-2xl mx-auto">
-                Join thousands of traders using indicator-led signals to make better trading decisions. No credit card required.
+                Mission Control shows the current state, including when the honest answer is to stay in cash.
               </p>
               <Button 
                 onClick={handleLogin}
@@ -268,7 +267,7 @@ export default function Home() {
                 className="bg-white text-indigo-900 hover:bg-slate-100 text-lg px-8 py-6"
               >
                 <Zap className="w-5 h-5 mr-2" />
-                Sign Up Now - It's Free
+                Sign In
               </Button>
             </div>
           </div>

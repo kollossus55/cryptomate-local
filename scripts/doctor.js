@@ -84,7 +84,7 @@ try {
     for (const [name, reason] of failed) info(`${name}: ${reason}`);
     problems++;
   }
-  for (const needed of ['tradingScheduler', 'autoTradingWorker', 'altcoinScannerWorker']) {
+  for (const needed of ['v6Engine', 'v6Control', 'altcoinScannerWorker']) {
     if (registry.has(needed)) ok(needed);
     else { bad(`${needed} is not loaded — trading cannot run`); problems++; }
   }
@@ -107,8 +107,9 @@ try {
 
   for (const s of all) {
     info(`account: ${s.created_by}`);
-    if (!s.is_enabled) { bad('auto-trading is DISABLED'); problems++; }
-    else ok('auto-trading enabled');
+    // Legacy off is the correct state: V6 refuses to share the account with it.
+    if (s.is_enabled) { bad('legacy auto-trading is ON — V6 blocks entries until it is off'); problems++; }
+    else ok('legacy auto-trading off');
 
     if (s.kill_switch_enabled) { bad('kill switch is ON — nothing will trade'); problems++; }
     if (s.execution_mode === 'browser') { bad("execution_mode is 'browser' — the server scheduler skips this account"); problems++; }
@@ -138,6 +139,44 @@ try {
   }
 } catch (err) {
   bad(`could not read settings: ${err.message}`);
+  problems++;
+}
+
+// ── V6 paper engine ───────────────────────────────────────────────────────
+console.log('\nV6 engine');
+try {
+  const { EntityStore } = await import(`${pathToFileURL(path.join(ROOT, 'server/entityStore.js')).href}`);
+  const store = new EntityStore(path.join(ROOT, 'data'));
+  const portfolios = store.list('Portfolio', {});
+  const row = portfolios.find((p) => p.v6_state);
+
+  if (!row) {
+    const held = portfolios.some((p) => p.positions?.some((x) => x.quantity));
+    if (held) { bad('account is not flat — V6 refuses to start, and it does not adopt legacy positions'); problems++; }
+    else info('V6 has not run yet; it starts on a flat account');
+  } else {
+    const state = row.v6_state;
+    const ageMin = state.lastTickT ? (Date.now() - state.lastTickT) / 60_000 : Infinity;
+    if (ageMin > 15) { bad(`last engine run ${Number.isFinite(ageMin) ? `${Math.round(ageMin)} min ago` : 'unknown'} — stops are not being checked`); problems++; }
+    else ok(`last engine run ${ageMin.toFixed(1)} min ago`);
+    if (state.outbox?.length) info(`${state.outbox.length} rows waiting in the outbox; the next cycle finishes them`);
+    if (state.riskState?.halt?.active) info(`halted: ${state.riskState.halt.source}, ${state.riskState.halt.reason}`);
+    ok(`equity ${Number(row.total_balance).toFixed(2)}, ${row.positions?.length ?? 0} open`);
+    if (state.cashCode) info(`in cash: ${state.cashCode}`);
+  }
+
+  const certs = store.list('V6Certificate', {}).filter((c) => c.status === 'valid');
+  // No certificate is a valid state, not a fault: the account simply holds cash.
+  info(`${certs.length} certificate(s) on file`);
+
+  const lease = store.list('V6Config', {})[0]?.engine_lease;
+  if (lease && lease.until < Date.now()) info('an expired engine lease is on file; the next cycle takes it over');
+
+  const open = store.list('V6RiskEvent', {}).filter((e) => e.severity === 'critical' && !e.acked_at && !e.cleared_at);
+  if (open.length) { bad(`${open.length} critical V6 alarm(s) open — see Mission Control`); problems++; }
+  else ok('no open critical alarms');
+} catch (err) {
+  bad(`could not read V6 state: ${err.message}`);
   problems++;
 }
 

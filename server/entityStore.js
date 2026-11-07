@@ -12,6 +12,7 @@
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, copyFileSync, readdirSync, rmSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 /**
  * The single operator this app runs as.
@@ -27,57 +28,133 @@ export const LOCAL_USER_EMAIL = process.env.OPERATOR_EMAIL || 'kollossus55@gmail
 /** Emails used by earlier builds, migrated forward on startup. */
 export const LEGACY_EMAILS = ['local@cryptomate'];
 
+// BOM-tolerant: Windows tooling (PowerShell 5.1 redirects, some editors) writes UTF-8
+// with a leading BOM, which JSON.parse rejects. A settings file turning "corrupt"
+// because of three invisible bytes is a cruel way to lose a trading session.
+function parseRows(file) {
+  const rows = JSON.parse(readFileSync(file, 'utf8').replace(/^[\uFEFF]/, ''));
+  if (!Array.isArray(rows)) throw new Error('the file does not hold a list');
+  return rows;
+}
+
+function writeAtomic(file, rows) {
+  const tmp = `${file}.tmp`;
+  writeFileSync(tmp, JSON.stringify(rows, null, 2), 'utf8');
+  renameSync(tmp, file);
+}
+
+// Small files that V6 cannot run safely without. Each write also refreshes a good copy,
+// so damage to the file costs nothing. The large logs are not worth doubling.
+const KEEP_GOOD_COPY = new Set(['Portfolio', 'V6Config', 'V6StrategyState', 'V6Certificate', 'AutoTradingSettings']);
+
 export class EntityStore {
   constructor(dataDir) {
     this.dir = path.join(dataDir, 'entities');
     if (!existsSync(this.dir)) mkdirSync(this.dir, { recursive: true });
     this.cache = new Map();
+    this.unreadable = new Map();
+    // Windows file names ignore case, so 'TRADE' and 'Trade' are one file. They must be
+    // one cache too: two caches of one file write each other's stale rows over the disk.
+    this.names = new Map();
+    const schemas = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'base44', 'entities');
+    const known = [...KEEP_GOOD_COPY, ...RESET_CLEARS, ...RESET_KEEPS, 'User'];
+    try { known.push(...readdirSync(schemas).filter((f) => f.endsWith('.jsonc')).map((f) => f.replace(/\.jsonc$/, ''))); } catch { /* no schema folder in a bare copy */ }
+    known.push(...readdirSync(this.dir).filter((f) => f.endsWith('.json')).map((f) => f.replace(/\.json$/, '')));
+    for (const name of known) if (!this.names.has(name.toLowerCase())) this.names.set(name.toLowerCase(), name);
   }
 
-  _file(name) {
+  /** The one spelling of an entity name, whatever case the caller used. */
+  canonicalName(name) {
     // Entity names come from the URL, so refuse anything that could escape the
     // data directory.
     if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(name)) {
       throw new Error(`Invalid entity name: ${name}`);
     }
-    return path.join(this.dir, `${name}.json`);
+    const key = name.toLowerCase();
+    if (!this.names.has(key)) this.names.set(key, name);
+    return this.names.get(key);
+  }
+
+  _file(name) {
+    return path.join(this.dir, `${this.canonicalName(name)}.json`);
   }
 
   _load(name) {
-    if (this.cache.has(name)) return this.cache.get(name);
+    const entity = this.canonicalName(name);
+    if (this.cache.has(entity)) return this.cache.get(entity);
 
-    const file = this._file(name);
+    const file = this._file(entity);
+    const good = `${file}.good`;
+    const keepsCopy = KEEP_GOOD_COPY.has(entity);
     if (!existsSync(file)) {
-      this.cache.set(name, []);
+      if (keepsCopy && existsSync(good)) return this._restore(entity, file, 'missing');
+      this.cache.set(entity, []);
       return [];
     }
 
+    let rows;
     try {
-      // BOM-tolerant: Windows tooling (PowerShell 5.1 redirects, some editors)
-      // writes UTF-8 with a leading BOM, which JSON.parse rejects. A settings
-      // file turning "corrupt" because of three invisible bytes is a cruel
-      // way to lose a trading session — strip it before parsing.
-      const rows = JSON.parse(readFileSync(file, 'utf8').replace(/^[\uFEFF]/, ''));
-      const list = Array.isArray(rows) ? rows : [];
-      this.cache.set(name, list);
-      return list;
+      rows = parseRows(file);
     } catch (err) {
-      // Preserve rather than overwrite — this may be the only copy of your
-      // trade history.
+      return this._unreadable(entity, file, err);
+    }
+    this.unreadable.delete(entity);
+    if (keepsCopy && !existsSync(good)) writeAtomic(good, rows);
+    // _save writes both files, so an empty file beside a full copy did not come from here.
+    if (keepsCopy && rows.length === 0 && this._goodHasRows(good)) return this._restore(entity, file, 'empty');
+    this.cache.set(entity, rows);
+    return rows;
+  }
+
+  _goodHasRows(good) {
+    try { return parseRows(good).length > 0; } catch { return false; }
+  }
+
+  // Unreadable is never empty: an empty answer would let a caller start the account over,
+  // or write a new file over the only copy of the history.
+  _unreadable(entity, file, err) {
+    if (!this.unreadable.has(entity)) {
       const salvage = `${file}.corrupt-${Date.now()}`;
       try { copyFileSync(file, salvage); } catch { /* best effort */ }
-      console.error(`[entities] ${name}.json unreadable (${err.message}); saved ${path.basename(salvage)}`);
-      this.cache.set(name, []);
-      return [];
+      console.error(`[entities] ${entity}.json unreadable (${err.message}); saved ${path.basename(salvage)}`);
+      this.unreadable.set(entity, { salvage: path.basename(salvage) });
     }
+    if (KEEP_GOOD_COPY.has(entity) && existsSync(`${file}.good`)) {
+      try {
+        return this._restore(entity, file, 'unreadable');
+      } catch (restoreErr) {
+        console.error(`[entities] ${entity}.json.good is unreadable too (${restoreErr.message})`);
+      }
+    }
+    throw Object.assign(new Error(`${entity}.json is unreadable, so nothing was read or written. Its contents are saved as ${this.unreadable.get(entity).salvage}. A person needs to repair it.`), { status: 503, code: 'ENTITY_UNREADABLE', entity });
+  }
+
+  _restore(entity, file, why) {
+    const rows = parseRows(`${file}.good`);
+    writeAtomic(file, rows);
+    this.cache.set(entity, rows);
+    this.unreadable.delete(entity);
+    console.error(`[entities] ${entity}.json was ${why}; restored from its latest good copy`);
+    // The engine holds new entries until the operator acknowledges this event.
+    try {
+      const t = Date.now();
+      this.create('V6RiskEvent', {
+        id: `v6e-restored-${entity}-${t}`, t, type: 'store_restored', severity: 'critical', code: 'store_restored',
+        message: `${entity}.json was ${why} and has been restored from its latest good copy. New entries are held until this is acknowledged. Exits continue.`,
+        data: { entity, why }, sticky: true, acked_at: null, cleared_at: null,
+      });
+    } catch (err) {
+      console.error(`[entities] could not record the restore of ${entity}: ${err.message}`);
+    }
+    return rows;
   }
 
   _save(name, rows) {
-    const file = this._file(name);
-    const tmp = `${file}.tmp`;
-    writeFileSync(tmp, JSON.stringify(rows, null, 2), 'utf8');
-    renameSync(tmp, file); // atomic
-    this.cache.set(name, rows);
+    const entity = this.canonicalName(name);
+    const file = this._file(entity);
+    writeAtomic(file, rows);
+    if (KEEP_GOOD_COPY.has(entity)) writeAtomic(`${file}.good`, rows);
+    this.cache.set(entity, rows);
   }
 
   /**
@@ -223,12 +300,13 @@ export class EntityStore {
       rows[i] = { ...rows[i], ...patch, updated_date: now };
       count++;
     }
-    this._save(name, rows);
+    if (count) this._save(name, rows);
     return { count };
   }
 
   delete(name, id) {
     const rows = this._load(name);
+    refuseV6Delete(name, rows.filter((r) => r.id === id));
     const next = rows.filter((r) => r.id !== id);
     if (next.length === rows.length) return false;
     this._save(name, next);
@@ -242,9 +320,10 @@ export class EntityStore {
     if (!query || Object.keys(query).length === 0) {
       throw new Error('deleteMany requires a query — refusing to delete every record');
     }
+    refuseV6Delete(name, rows.filter((r) => this._match(r, query)));
     const next = rows.filter((r) => !this._match(r, query));
     const count = rows.length - next.length;
-    this._save(name, next);
+    if (count) this._save(name, next);
     return { count };
   }
 }
@@ -265,7 +344,9 @@ export function migrateOperatorEmail(store, { from = LEGACY_EMAILS, to = LOCAL_U
 
   for (const file of files) {
     const name = file.replace(/\.json$/, '');
-    const rows = store._load(name);
+    let rows;
+    // One damaged file must not stop the server from starting. Its readers will refuse.
+    try { rows = store._load(name); } catch (err) { log?.error?.(err.message); continue; }
     let changed = false;
 
     for (const row of rows) {
@@ -296,7 +377,8 @@ export function migrateOperatorEmail(store, { from = LEGACY_EMAILS, to = LOCAL_U
  */
 export function ensureOperatorUser(store, { email = LOCAL_USER_EMAIL, name, log } = {}) {
   const fullName = name || process.env.OPERATOR_NAME || 'Administrator';
-  const users = store.list('User', {});
+  let users;
+  try { users = store.list('User', {}); } catch (err) { log?.error?.(err.message); return null; }
 
   // Match on the current email, or on a legacy one so a rename updates in place.
   const existing = users.find((u) => u.email === email)
@@ -391,21 +473,140 @@ export const RESET_KEEPS = [
   // portfolio — a main-account reset leaves the lab's track record running.
   'StrategyLabAccount',
   'StrategyLabTrade',
+  // V6's record survives a legacy reset: its ledger, trades and events must agree.
+  'V6Config',
+  'V6StrategyState',
+  'V6SignalTest',
+  'V6RiskEvent',
+  'V6ExchangeHealth',
+  'V6Certificate',
+  'V6EquityPoint',
 ];
+
+export const V6_TRADE_EXCHANGE = 'Paper Trading (V6)';
+
+// Entity names are compared in lower case: Windows file names are not case sensitive,
+// so 'TRADE' reaches the same file as 'Trade'.
+function isV6Record(name, row) {
+  const entity = String(name).toLowerCase();
+  if (entity === 'trade') return row.exchange === V6_TRADE_EXCHANGE;
+  if (entity === 'portfolio') return Boolean(row.v6_ledger || row.v6_state);
+  return false;
+}
+
+// In the store, so the browser, the entity API and every function are all covered.
+function refuseV6Delete(name, rows) {
+  if (!rows.some((row) => isV6Record(name, row))) return;
+  throw Object.assign(new Error(`V6 records cannot be deleted: ${name} delete refused, nothing was removed.`), { status: 403 });
+}
+
+// The engine, v6Control and the certificate script all reach the store directly, so
+// closing the HTTP entity API leaves every V6 entity writable by those three alone.
+export const entityApiReadOnly = (name) => /^v6/i.test(String(name));
+
+const refuseApi = (message) => {
+  throw Object.assign(new Error(message), { status: 403 });
+};
+
+const asList = (body) => (Array.isArray(body) ? body : [body]);
+
+const isV6Exchange = (value) => String(value ?? '').trim().toLowerCase() === V6_TRADE_EXCHANGE.toLowerCase();
+
+// Without the mark: a page holding a slightly old copy has changed nothing of the engine's.
+const v6Fields = (v6) => {
+  if (!v6 || typeof v6 !== 'object') return JSON.stringify(v6 ?? null);
+  const { lastPrice: _mark, ...rest } = v6;
+  return JSON.stringify(rest);
+};
+
+function refuseEngineFields(data, current) {
+  for (const key of Object.keys(data ?? {})) {
+    if (/^v6/i.test(key)) refuseApi(`${key} belongs to the V6 engine and cannot be written here.`);
+  }
+  if (!Array.isArray(data?.positions)) return;
+  const stored = new Map((current?.positions ?? []).map((p) => [p.asset_symbol, p.v6]));
+  for (const p of data.positions) {
+    if (p?.v6 !== undefined && v6Fields(p.v6) !== v6Fields(stored.get(p.asset_symbol))) {
+      refuseApi('Position fields under v6 belong to the V6 engine and cannot be written here.');
+    }
+  }
+}
+
+function guardPortfolio(store, { method, tail, body }) {
+  if (method === 'POST') {
+    asList(body).forEach((item) => refuseEngineFields(item));
+    if (store.list('Portfolio', {}).some((row) => isV6Record('Portfolio', row))) {
+      refuseApi('V6 runs this account, and a second Portfolio row is not allowed.');
+    }
+  } else if (method === 'PATCH' && tail === 'many') {
+    refuseEngineFields(body?.data);
+    if (store.list('Portfolio', { filter: body?.query }).some((row) => isV6Record('Portfolio', row))) {
+      refuseApi('A bulk update cannot touch the V6 account.');
+    }
+  } else if (method === 'PATCH') {
+    refuseEngineFields(body, store.get('Portfolio', tail));
+  }
+}
+
+function guardTrade(store, { method, tail, body }) {
+  const v6Text = 'V6 trades are written by the engine and cannot be changed here.';
+  if (method === 'POST') {
+    for (const item of asList(body)) {
+      // Fixed ids make the outbox repeatable, so a planted id would hide the real row.
+      if (isV6Exchange(item?.exchange) || /^v6/i.test(String(item?.id ?? ''))) refuseApi(v6Text);
+    }
+  } else if (method === 'PATCH') {
+    const many = tail === 'many';
+    if (isV6Exchange((many ? body?.data : body)?.exchange)) refuseApi(v6Text);
+    const targets = many ? store.list('Trade', { filter: body?.query }) : [store.get('Trade', tail)].filter(Boolean);
+    if (targets.some((row) => isV6Record('Trade', row))) refuseApi(v6Text);
+  }
+}
+
+// The admin page depends on this record, and role is what makes it reachable.
+function guardUser(store, { method, tail, body }) {
+  const many = tail === 'many';
+  if (tail === 'bulk' || !tail) return;
+  const targets = many
+    ? store.list('User', { filter: body?.query })
+    : [store.get('User', tail)].filter(Boolean);
+  if (!targets.some((user) => user.email === LOCAL_USER_EMAIL)) return;
+  if (method === 'DELETE') refuseApi('You cannot delete your own operator account.');
+  if (method !== 'PATCH') return;
+  const patch = (many ? body?.data : body) ?? {};
+  if (Object.hasOwn(patch, 'role') && patch.role !== 'admin') refuseApi('You cannot remove admin from your own account.');
+  if (Object.hasOwn(patch, 'email') && patch.email !== LOCAL_USER_EMAIL) refuseApi('The operator email is set in the server configuration.');
+}
+
+/**
+ * Every write through /api/entities passes here, with the canonical entity name.
+ * Engine-owned state is writable only by the engine and v6Control, which use the store.
+ */
+export function assertEntityApiWrite(store, request) {
+  const { name } = request;
+  if (entityApiReadOnly(name)) refuseApi(`${name} is read only here.`);
+  if (name === 'Portfolio') guardPortfolio(store, request);
+  else if (name === 'Trade') guardTrade(store, request);
+  else if (name === 'User') guardUser(store, request);
+}
 
 export function resetTradingData(store, { startingBalance = 10000, log } = {}) {
   const cleared = {};
 
   for (const name of RESET_CLEARS) {
     const rows = store.list(name, {});
-    if (rows.length) {
-      store._save(name, []);
-      cleared[name] = rows.length;
+    const kept = name === 'Trade' ? rows.filter((r) => r.exchange === V6_TRADE_EXCHANGE) : [];
+    if (rows.length > kept.length) {
+      store._save(name, kept);
+      cleared[name] = rows.length - kept.length;
     }
   }
 
   // Portfolio back to a clean paper account.
-  const portfolios = store.list('Portfolio', {});
+  // A row V6 runs on is left alone: rewriting its balances would leave v6_ledger
+  // stale and break the identity between ledger, positions and Trade rows.
+  const allPortfolios = store.list('Portfolio', {});
+  const portfolios = allPortfolios.filter((p) => !p.v6_ledger && !p.v6_state);
   for (const p of portfolios) {
     store.update('Portfolio', p.id, {
       available_balance: startingBalance,
@@ -435,5 +636,5 @@ export function resetTradingData(store, { startingBalance = 10000, log } = {}) {
   log?.warn(`Trading data reset. Cleared: ${JSON.stringify(cleared)}. ` +
             `Portfolio reset to ${startingBalance}.`);
 
-  return { cleared, portfoliosReset: portfolios.length, startingBalance };
+  return { cleared, portfoliosReset: portfolios.length, v6PortfoliosKept: allPortfolios.length - portfolios.length, startingBalance };
 }

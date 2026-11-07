@@ -786,7 +786,7 @@ export default function AIRecommendationNotification({ assets, onTradeAsset, onE
                             <div className={`text-2xl font-bold ${getConfidenceColor(rec.confidence)}`}>
                               {rec.confidence}%
                             </div>
-                            <p className="text-indigo-300 text-xs">AI Confidence</p>
+                            <p className="text-indigo-300 text-xs">Model score (not a probability)</p>
                           </div>
                         </div>
 

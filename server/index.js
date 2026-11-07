@@ -31,9 +31,11 @@ loadEnv(ROOT);
 
 const {
   EntityStore, LOCAL_USER_EMAIL, migrateOperatorEmail, ensureOperatorUser,
-  snapshotEntities, resetTradingData, RESET_CLEARS, RESET_KEEPS,
+  snapshotEntities, resetTradingData, RESET_CLEARS, RESET_KEEPS, assertEntityApiWrite,
 } = await import('./entityStore.js');
-const { FunctionRegistry, makeBase44Shim } = await import('./functionRuntime.js');
+const {
+  FunctionRegistry, makeBase44Shim, guardStoreForPaperLock, assertPaperLockAtBoot, paperLockStatus,
+} = await import('./functionRuntime.js');
 const { Logger } = await import('./logger.js');
 const { Scheduler } = await import('./scheduler.js');
 const { Auth } = await import('./auth.js');
@@ -55,6 +57,10 @@ const HOST = process.env.HOST || '127.0.0.1';
 
 const log = new Logger({ dir: path.join(DATA, 'logs') });
 const store = new EntityStore(DATA);
+
+// LOCAL CHANGE: PAPER_ONLY lock. Guarded here, before anything can write, so the
+// entity API below and every function share one refusal for arming fields.
+guardStoreForPaperLock(store);
 
 // Re-stamp any records created under an older operator email, so changing it
 // does not hide existing data from the functions that filter on created_by.
@@ -137,12 +143,43 @@ const parseQuery = (url) => {
 // Routes
 // ---------------------------------------------------------------------------
 
+// A page on another site can POST here without any CORS permission, and with no password
+// set nothing else would stop it. So state changes are checked whatever the auth state.
+// A request with no Origin is a local tool, not a browser page.
+function refuseCrossSite(req, segments) {
+  // The same segments the router reads: empty ones are dropped there, so /.//api is an API path.
+  if (segments[0]?.toLowerCase() !== 'api') return null;
+  const hostName = String(req.headers.host ?? '').replace(/:\d+$/, '').toLowerCase();
+  // A rebound DNS name reaches this port with a Host that is not ours. Reads count: the page
+  // that rebound it is same-origin to itself and could read every answer.
+  if (hostName && ![HOST, 'localhost', '127.0.0.1', '[::1]'].includes(hostName)) {
+    return { status: 403, error: 'Refused: this request did not come from this app.' };
+  }
+  if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return null;
+  const origin = req.headers.origin;
+  const own = [HOST, 'localhost', '127.0.0.1'].map((h) => `http://${h}:${PORT}`);
+  if (origin && !own.includes(origin) && !DEV_ORIGINS.has(origin)) {
+    return { status: 403, error: 'Refused: this request came from another site.' };
+  }
+  if (req.headers['sec-fetch-site'] === 'cross-site') {
+    return { status: 403, error: 'Refused: this request came from another site.' };
+  }
+  const hasBody = Number(req.headers['content-length'] ?? 0) > 0 || req.headers['transfer-encoding'] !== undefined;
+  if (hasBody && !/^application\/json\b/i.test(String(req.headers['content-type'] ?? ''))) {
+    return { status: 415, error: 'Send JSON: Content-Type must be application/json.' };
+  }
+  return null;
+}
+
 async function handle(req, res) {
   const url = new URL(req.url, `http://${HOST}:${PORT}`);
   const segments = url.pathname.split('/').filter(Boolean);
 
   // Remember the request Origin so json() can decide on CORS per response.
   if (req.headers.origin) reqOrigin.set(res, req.headers.origin);
+
+  const refusal = refuseCrossSite(req, segments);
+  if (refusal) return json(res, refusal.status, { error: refusal.error });
 
   if (req.method === 'OPTIONS') return json(res, 204, null);
 
@@ -165,6 +202,8 @@ async function handle(req, res) {
       functions: registry.handlers.size,
       failed: [...registry.loadErrors.keys()],
       scheduler: scheduler?.status() ?? null,
+      // LOCAL CHANGE: PAPER_ONLY lock. Read only; the Trading page uses this.
+      paperLock: paperLockStatus(),
     });
   }
 
@@ -349,31 +388,15 @@ async function handle(req, res) {
 
   // /api/entities/:name[/:id | /many | /bulk]
   if (segments[0] === 'api' && segments[1] === 'entities') {
-    const name = segments[2];
+    if (!segments[2]) return json(res, 400, { error: 'Entity name required' });
     const tail = segments[3];
-    if (!name) return json(res, 400, { error: 'Entity name required' });
-
-    // The operator's own User record is what makes the admin page reachable
-    // (it checks role === 'admin'). Deleting or demoting it would lock you out
-    // of that page until the next server restart repaired it, so refuse here
-    // rather than letting the UI offer a button that breaks things.
-    if (name === 'User' && tail && tail !== 'many' && tail !== 'bulk' &&
-        (req.method === 'DELETE' || req.method === 'PATCH')) {
-      const target = store.get('User', tail);
-      if (target?.email === LOCAL_USER_EMAIL) {
-        if (req.method === 'DELETE') {
-          return json(res, 400, { error: 'You cannot delete your own operator account.' });
-        }
-        const patch = await readBody(req);
-        if (patch.role && patch.role !== 'admin') {
-          return json(res, 400, { error: 'You cannot remove admin from your own account.' });
-        }
-        const updated = store.update('User', tail, patch);
-        return json(res, 200, updated);
-      }
-    }
 
     try {
+      // Canonical first: every check below compares names, and the URL can use any case.
+      const name = store.canonicalName(segments[2]);
+      const body = req.method === 'GET' ? undefined : await readBody(req);
+      if (req.method !== 'GET') assertEntityApiWrite(store, { method: req.method, name, tail, body });
+
       if (req.method === 'GET' && !tail) {
         return json(res, 200, store.list(name, parseQuery(url)));
       }
@@ -382,29 +405,28 @@ async function handle(req, res) {
         return row ? json(res, 200, row) : json(res, 404, { error: 'Not found' });
       }
       if (req.method === 'POST' && tail === 'bulk') {
-        return json(res, 200, store.bulkCreate(name, await readBody(req)));
+        return json(res, 200, store.bulkCreate(name, body));
       }
       if (req.method === 'POST') {
-        return json(res, 200, store.create(name, await readBody(req)));
+        return json(res, 200, store.create(name, body));
       }
       if (req.method === 'PATCH' && tail === 'many') {
-        const { query, data } = await readBody(req);
-        return json(res, 200, store.updateMany(name, query, data));
+        return json(res, 200, store.updateMany(name, body.query, body.data));
       }
       if (req.method === 'PATCH' && tail) {
-        const updated = store.update(name, tail, await readBody(req));
+        const updated = store.update(name, tail, body);
         return updated ? json(res, 200, updated) : json(res, 404, { error: 'Not found' });
       }
       if (req.method === 'DELETE' && tail === 'many') {
-        const { query } = await readBody(req);
-        return json(res, 200, store.deleteMany(name, query));
+        return json(res, 200, store.deleteMany(name, body.query));
       }
       if (req.method === 'DELETE' && tail) {
         return json(res, 200, { deleted: store.delete(name, tail) });
       }
       return json(res, 405, { error: `${req.method} not supported here` });
     } catch (err) {
-      return json(res, 400, { error: err.message });
+      // LOCAL CHANGE: a PAPER_ONLY refusal carries 403.
+      return json(res, err.status || 400, { error: err.message });
     }
   }
 
@@ -572,6 +594,10 @@ server.listen(PORT, HOST, () => {
     ? `UI:   http://${HOST}:${PORT}`
     : 'UI:   not built yet — run `npm run build`');
   log.info('─'.repeat(58));
+
+  // LOCAL CHANGE: PAPER_ONLY lock state and live-state check, recorded every boot.
+  // Logs only: the scheduler below must start regardless, so exits keep running.
+  assertPaperLockAtBoot({ store, log });
 
   // Warn about configurations that produce a busy-looking bot that never
   // trades. Both of these fail closed by design, which is correct — but silent

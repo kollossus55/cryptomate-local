@@ -4,3 +4,4 @@ data/
 .env
 *.log
 *.zip
+PAPER_LOCK_RELEASED

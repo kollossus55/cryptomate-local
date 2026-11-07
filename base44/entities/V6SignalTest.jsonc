@@ -1,0 +1,68 @@
+{
+  "name": "V6SignalTest",
+  "type": "object",
+  "properties": {
+    "t": {
+      "type": "number"
+    },
+    "bar_time": {
+      "type": "number"
+    },
+    "symbol": {
+      "type": "string"
+    },
+    "strategy_id": {
+      "type": "string"
+    },
+    "side": {
+      "type": "string"
+    },
+    "reason": {
+      "type": "string"
+    },
+    "not_tested_reason": {
+      "type": "string"
+    },
+    "rank_in_batch": {
+      "type": "number"
+    },
+    "batch_size": {
+      "type": "number"
+    },
+    "outcome": {
+      "type": "string",
+      "enum": [
+        "entered",
+        "blocked",
+        "rejected",
+        "shadow",
+        "not_tested"
+      ]
+    },
+    "reject_code": {
+      "type": "string"
+    },
+    "blocked_by": {
+      "type": "string"
+    },
+    "blocked_text": {
+      "type": "string"
+    },
+    "not_tested_reason": {
+      "type": "string"
+    },
+    "checks": {
+      "type": "array"
+    },
+    "exit_profile": {
+      "type": "string"
+    },
+    "stop_distance_pct": {
+      "type": "number"
+    },
+    "trade_id": {
+      "type": "string"
+    }
+  },
+  "required": []
+}

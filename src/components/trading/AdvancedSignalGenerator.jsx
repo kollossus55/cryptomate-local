@@ -13,24 +13,15 @@ const cache = {
 
 const CACHE_DURATION = 10 * 60 * 1000; // 10 minutes
 
-// Rate limit — max live web-search calls per minute
-const RATE_LIMIT = 8;
-const rateLimitTracker = { callCount: 0, windowStart: Date.now() };
+// aiMarketIntelligence serves one call per 60s and answers 503 otherwise, so
+// asking faster only fills the server log. One call at a time, spaced to match,
+// and failures back off instead of repeating on every poll.
+const CALL_SPACING_MS = 60 * 1000;
+const MAX_BACKOFF_MS = 30 * 60 * 1000;
+const gate = { nextCallAt: 0, failures: 0, inFlight: false };
 
-const checkRateLimit = () => {
-  const now = Date.now();
-  const oneMinute = 60 * 1000;
-  if (now - rateLimitTracker.windowStart > oneMinute) {
-    rateLimitTracker.windowStart = now;
-    rateLimitTracker.callCount = 0;
-  }
-  if (rateLimitTracker.callCount >= RATE_LIMIT) {
-    console.warn('⚠️ Rate limit: skipping market intelligence fetch');
-    return false;
-  }
-  rateLimitTracker.callCount++;
-  return true;
-};
+/** How long until a new intelligence call may be made. 0 means now. */
+export const marketIntelligenceRetryInMs = () => Math.max(0, gate.nextCallAt - Date.now());
 
 // Real-time market intelligence (news, social, on-chain) via server-side
 // backend function with live web search. Returns null when rate-limited or
@@ -41,26 +32,40 @@ export const fetchMarketIntelligence = async (asset) => {
     return cached.data;
   }
 
-  if (!checkRateLimit()) return null;
+  if (gate.inFlight || marketIntelligenceRetryInMs() > 0) return null;
 
+  gate.inFlight = true;
   try {
-    const response = await base44.functions.invoke('aiMarketIntelligence', {
+    // invoke() resolves to { data }: the function's own body is under .data.
+    const { data } = await base44.functions.invoke('aiMarketIntelligence', {
       symbol: asset.symbol,
       name: asset.name,
     });
 
-    if (!response?.success) return null;
+    gate.nextCallAt = Date.now() + CALL_SPACING_MS;
+    if (!data?.success) return null;
+    gate.failures = 0;
 
     const result = {
-      news: response.news,
-      social: response.social,
-      onchain: response.onchain,
+      news: data.news,
+      social: data.social,
+      onchain: data.onchain,
+      fetchedAt: new Date().toISOString(),
     };
     cache.intelligence.set(asset.symbol, { data: result, timestamp: Date.now() });
     return result;
   } catch (error) {
-    console.error("Market intelligence fetch failed:", error);
+    if (error?.status === 503) {
+      // The server's own throttle: expected, and it says when to come back.
+      gate.nextCallAt = Date.now() + (error.body?.retry_after_ms ?? CALL_SPACING_MS);
+    } else {
+      gate.failures += 1;
+      gate.nextCallAt = Date.now() + Math.min(MAX_BACKOFF_MS, CALL_SPACING_MS * 2 ** gate.failures);
+      if (gate.failures === 1) console.warn('Market intelligence unavailable:', error?.message);
+    }
     return null;
+  } finally {
+    gate.inFlight = false;
   }
 };
 

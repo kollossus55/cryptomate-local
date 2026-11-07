@@ -10,8 +10,9 @@
  */
 
 const JOBS = [
-  // Matches "Auto Trading Scheduler" — */5 * * * *
-  { name: 'tradingScheduler', fn: 'tradingScheduler', everyMinutes: 5 },
+  // V6 paper engine. Replaced the legacy tradingScheduler job at cutover: the two
+  // must never run against Portfolio together (CONTRACT section 6).
+  { name: 'v6Engine', fn: 'v6Engine', everyMinutes: 5 },
   // Matches "Altcoin Scan Scheduler" — */15 * * * *
   { name: 'altcoinScan', fn: 'altcoinScannerWorker', everyMinutes: 15 },
   // Matches "Notification Cleanup" — daily
@@ -60,6 +61,7 @@ export class Scheduler {
 
   start() {
     this.startHeartbeat();
+    let scheduled = 0;
     for (const job of JOBS) {
       if (!this.registry.has(job.fn)) {
         this.log.warn(`Scheduler: "${job.fn}" is not loaded — skipping ${job.name}`);
@@ -75,6 +77,9 @@ export class Scheduler {
         try {
           const result = await this.registry.invoke(job.fn, {});
           this.lastRun[job.name] = { at: new Date().toISOString(), ok: true, result };
+          // Worker console output never reaches the log files, so a job that wants
+          // a durable line per cycle returns it.
+          if (typeof result?.logLine === 'string') this.log.info(`${job.name}: ${result.logLine}`);
         } catch (err) {
           this.lastRun[job.name] = { at: new Date().toISOString(), ok: false, error: err.message };
           this.log.error(`${job.name} failed: ${err.message}`);
@@ -84,7 +89,8 @@ export class Scheduler {
       };
 
       // Stagger the first run so three jobs do not all fire at boot.
-      const delay = this.timers.length * 20_000 + 10_000;
+      // Counted here because this.timers only fills after each first run.
+      const delay = scheduled++ * 20_000 + 10_000;
       setTimeout(() => { tick(); this.timers.push(setInterval(tick, job.everyMinutes * 60_000)); }, delay);
 
       this.log.info(`Scheduled ${job.name} every ${job.everyMinutes} min`);

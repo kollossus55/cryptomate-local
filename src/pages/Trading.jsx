@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { base44 } from "@/api/base44Client";
+import { V6_EXCHANGE, V6_RESET_REFUSED, v6RecordExists } from "@/lib/v6Trades";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -39,7 +40,23 @@ import ConfluenceSignalScanner from "../components/trading/ConfluenceSignalScann
 import { scanAltcoins } from "../components/trading/AltcoinScanner";
 import { useOkxWebSocket } from "../components/trading/useOkxWebSocket";
 
+// LOCAL CHANGE: PAPER_ONLY lock (docs/rebuild/paper-lock.md). Asks the server, and
+// counts as locked unless it answers locked: false, so a failed request can never
+// offer a live path. Same base URL rule as api/base44Client.js.
+const API_BASE = import.meta.env?.VITE_API_URL ?? (import.meta.env?.DEV ? 'http://127.0.0.1:8788' : '');
+const fetchPaperLock = async () => {
+  const res = await fetch(`${API_BASE}/api/health`, { credentials: 'include' });
+  return (await res.json())?.paperLock ?? null;
+};
+
 export default function Trading() {
+  const { data: paperLock } = useQuery({
+    queryKey: ['paper-lock'],
+    queryFn: fetchPaperLock,
+    staleTime: 60000,
+  });
+  const paperLocked = paperLock?.locked !== false;
+
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedAsset, setSelectedAsset] = useState(null);
   const [tradeType, setTradeType] = useState(null);
@@ -409,6 +426,9 @@ export default function Trading() {
 
   const resetPortfolioMutation = useMutation({
     mutationFn: async () => {
+      // First, before the Portfolio write below: that row holds the V6 ledger.
+      if (await v6RecordExists()) throw new Error(V6_RESET_REFUSED);
+
       if (portfolio?.id) {
         await base44.entities.Portfolio.update(portfolio.id, {
           total_balance: paperBaseAmount,
@@ -442,7 +462,7 @@ export default function Trading() {
       // with "Entity Trade not found" when Promise.all tried to delete the
       // same record twice.
       console.log("Deleting trade history...");
-      await base44.entities.Trade.deleteMany({});
+      await base44.entities.Trade.deleteMany({ exchange: { $ne: V6_EXCHANGE } });
       console.log("✅ Trade history cleared");
     },
     onSuccess: () => {
@@ -627,6 +647,11 @@ export default function Trading() {
   };
 
   const handleExecuteLiveTrade = async ({ asset, tradeType, quantity, price }) => {
+    // LOCAL CHANGE: PAPER_ONLY lock. The modal never gets this handler while locked.
+    if (paperLocked) {
+      alert('Paper lock is on. No order was sent.');
+      return;
+    }
     try {
       const connections = await base44.entities.ExchangeConnection.list();
       const activeConn = connections?.find(c => c.is_active && c.connection_status === 'connected');
@@ -1047,7 +1072,11 @@ export default function Trading() {
 
   const handleResetPortfolio = async () => {
     if (window.confirm(`Are you sure you want to reset your paper trading portfolio? This will clear all trades and reset your balance to $${paperBaseAmount.toLocaleString()}.`)) {
-      await resetPortfolioMutation.mutateAsync();
+      try {
+        await resetPortfolioMutation.mutateAsync();
+      } catch (err) {
+        alert(err.message);
+      }
     }
   };
 
@@ -1514,6 +1543,11 @@ export default function Trading() {
                 </div>
                 <p className="text-yellow-200 text-sm">
                   Trading with simulated funds and real-time market data. <strong>No real money at risk.</strong>
+                  {paperLocked && (
+                    <span className="block mt-1 font-semibold">
+                      Paper lock is on: every order on this page is simulated and none can reach an exchange.
+                    </span>
+                  )}
                   {lastPriceUpdate && !isWsConnected && (
                     <span className="ml-2 text-yellow-300/70">
                       • Last Poll {lastPriceUpdate.toLocaleTimeString()}
@@ -1566,9 +1600,12 @@ export default function Trading() {
           </div>
         </div>
 
-        <div className="mb-6">
-          <LiveTradingPanel />
-        </div>
+        {/* LOCAL CHANGE: PAPER_ONLY lock. The arming panel is the live path, so it is hidden. */}
+        {!paperLocked && (
+          <div className="mb-6">
+            <LiveTradingPanel />
+          </div>
+        )}
 
         {trades && trades.length >= 5 && (
           <div className="mb-6">
@@ -1777,9 +1814,9 @@ export default function Trading() {
           asset={selectedAsset}
           tradeType={tradeType}
           onExecuteTrade={handleExecuteTrade}
-          onExecuteLiveTrade={handleExecuteLiveTrade}
+          onExecuteLiveTrade={paperLocked ? undefined : handleExecuteLiveTrade}
           portfolio={portfolio}
-          liveTradingEnabled={autoTradingSettings?.live_trading_enabled && !autoTradingSettings?.kill_switch_enabled}
+          liveTradingEnabled={!paperLocked && autoTradingSettings?.live_trading_enabled && !autoTradingSettings?.kill_switch_enabled}
         />
       )}
 

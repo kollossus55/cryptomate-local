@@ -50,6 +50,18 @@ import {
  *   volume = quantity, rounded DOWN to the pair's lot_decimals (string)
  */
 
+// LOCAL CHANGE: PAPER_ONLY lock (docs/rebuild/paper-lock.md). Second layer behind
+// the denylist in server/functionRuntime.js, for any caller that reaches this
+// code some other way. Fails closed: no lock value at all means locked.
+function paperLockRefusal(): Response | null {
+  if ((globalThis as any).__CRYPTOMATE_PAPER_LOCK__?.locked === false) return null;
+  return Response.json({
+    success: false,
+    error: 'PAPER_ONLY lock is on: no order was sent. Orders are paper.',
+    paper_lock: true,
+  }, { status: 403 });
+}
+
 // ---------------------------------------------------------------------------
 // LOCAL FIX: instrument precision + defensive response handling helpers.
 // Everything below exists because the live path used to send raw float
@@ -352,6 +364,10 @@ function enforceOrderSize(
 }
 
 export default async function(req: Request): Promise<Response> {
+  // LOCAL CHANGE: PAPER_ONLY lock. First statement, before any decrypt.
+  const locked = paperLockRefusal();
+  if (locked) return locked;
+
   try {
     const base44 = createClientFromRequest(req);
     const user = await base44.auth.me();
@@ -466,6 +482,10 @@ export default async function(req: Request): Promise<Response> {
 // ---------------------------------------------------------------------------
 
 async function executeOkxOrder(base44: any, params: any): Promise<Response> {
+  // LOCAL CHANGE: PAPER_ONLY lock, repeated here in case this is ever called directly.
+  const locked = paperLockRefusal();
+  if (locked) return locked;
+
   const {
     apiKey, apiSecret, apiPassphrase, asset_symbol, side, order_type,
     quantity, price, isTestnet, dry_run, actingEmail,
@@ -657,6 +677,10 @@ async function reconcileOkxOrder(
 // ---------------------------------------------------------------------------
 
 async function executeKrakenOrder(base44: any, params: any): Promise<Response> {
+  // LOCAL CHANGE: PAPER_ONLY lock, repeated here in case this is ever called directly.
+  const locked = paperLockRefusal();
+  if (locked) return locked;
+
   const {
     apiKey, apiSecret, asset_symbol, side, order_type,
     quantity, price, dry_run, confirm_live, actingEmail,

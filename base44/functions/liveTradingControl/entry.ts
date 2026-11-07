@@ -39,6 +39,18 @@ export default async function(req: Request): Promise<Response> {
       return Response.json({ error: 'Invalid action (request, enable, disable, cancel)' }, { status: 400 });
     }
 
+    // LOCAL CHANGE: PAPER_ONLY lock (docs/rebuild/paper-lock.md). Second layer behind
+    // the denylist in server/functionRuntime.js. Disarming stays allowed so live
+    // state can be cleared while locked. No lock value means locked.
+    const paperLocked = (globalThis as any).__CRYPTOMATE_PAPER_LOCK__?.locked !== false;
+    if (paperLocked && action !== 'disable' && action !== 'cancel') {
+      return Response.json({
+        success: false,
+        error: 'PAPER_ONLY lock is on: live trading cannot be armed.',
+        paper_lock: true,
+      }, { status: 403 });
+    }
+
     const user_email = user.email;
 
     // Load the caller's settings (may not exist yet on first request).

@@ -200,7 +200,7 @@ Back up by copying the `data` folder. That's the whole state.
 
 ## Going live
 
-Unchanged from the hosted app — same arming sequence, same 24-hour cooldown, same server-side checks.
+Live trading is off by a code lock, `PAPER_ONLY`, which no setting in the app can change. Releasing it takes a deliberate edit on this machine: see `docs/rebuild/paper-lock.md`. After a release, the arming sequence and 24-hour cooldown apply as before. While locked, `dry_run` on `liveOrderExecution` is refused; test credentials from Exchange Settings instead.
 
 The key is already set up (`EXCHANGE_ENCRYPTION_KEY` in `.env`, exactly 64
 hex chars — all consumers validate that format strictly and refuse anything
@@ -215,7 +215,7 @@ run the arming sequence with **testnet API keys** once, watching the server
 log end to end. Live orders that code never sent are the only feedback that
 counts.
 
-Create API keys with **read and spot-trade permissions only**. The app rejects any key that can withdraw.
+Create API keys with **read and spot-trade permissions only**. The app does not check this for you: confirm withdrawal rights are off on the exchange when you create the key.
 
 ---
 

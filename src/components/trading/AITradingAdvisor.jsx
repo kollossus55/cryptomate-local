@@ -286,7 +286,7 @@ export default function AITradingAdvisor({
         <CardContent>
           <div className="text-center py-8">
             <Lightbulb className="w-12 h-12 text-indigo-400 mx-auto mb-4" />
-            <p className="text-slate-300 mb-2">Complete at least 5 trades to unlock AI-powered insights</p>
+            <p className="text-slate-300 mb-2">Complete at least 5 trades to see a model-written review</p>
             <p className="text-slate-400 text-sm">
               The advisor will analyze your performance and provide personalized recommendations
             </p>

@@ -1,0 +1,37 @@
+{
+  "name": "V6ExchangeHealth",
+  "type": "object",
+  "properties": {
+    "venue": {
+      "type": "string"
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "breaker": {
+      "type": "string"
+    },
+    "latency_ms": {
+      "type": "number"
+    },
+    "last_ok": {
+      "type": "string"
+    },
+    "last_error": {
+      "type": "string"
+    },
+    "last_error_at": {
+      "type": "string"
+    },
+    "retry_until": {
+      "type": "number"
+    },
+    "consecutive_failures": {
+      "type": "number"
+    },
+    "rate_limited": {
+      "type": "boolean"
+    }
+  },
+  "required": []
+}

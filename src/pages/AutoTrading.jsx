@@ -326,7 +326,7 @@ export default function AutoTrading() {
           <h1 className="text-4xl font-bold mb-2 bg-gradient-to-r from-indigo-400 to-purple-400 bg-clip-text text-transparent">
             Auto-Trading Settings
           </h1>
-          <p className="text-slate-400">Configure AI-powered automated trading with risk management</p>
+          <p className="text-slate-400">Settings for the old auto-trading engine. These do not affect V6.</p>
         </div>
 
         {/* Server-Side Mode Notice */}
@@ -349,15 +349,11 @@ export default function AutoTrading() {
                   </div>
                   <div className="flex items-center gap-2 text-slate-300">
                     <CheckCircle className="w-4 h-4 text-green-400" />
-                    <span>✅ Respects all risk limits</span>
+                    <span>Applies the risk limits below. They did not stop this engine losing money</span>
                   </div>
                   <div className="flex items-center gap-2 text-slate-300">
                     <CheckCircle className="w-4 h-4 text-green-400" />
                     <span>✅ Stop loss & take profit</span>
-                  </div>
-                  <div className="flex items-center gap-2 text-slate-300">
-                    <CheckCircle className="w-4 h-4 text-green-400" />
-                    <span>✅ Browser fallback if server is down</span>
                   </div>
                 </div>
               </div>
@@ -417,7 +413,7 @@ export default function AutoTrading() {
             <div>
               <p className="text-sm font-medium text-white">V5 Server Worker (fixed)</p>
               <p className="text-xs text-slate-400 mt-0.5">
-                All trades execute in the local server process — every 5 minutes, with real Binance OHLCV data, whether this page is open or not, even logged out. Browser-side trading was removed on 2026-10-27: a background tab cannot manage stop-losses reliably and previously traded on synthetic prices.
+                All trades execute in the local server process — every 5 minutes, with exchange OHLCV data, whether this page is open or not, even logged out. Browser-side trading was removed on 2026-10-27: a background tab cannot manage stop-losses reliably and previously traded on synthetic prices.
               </p>
             </div>
           </div>
@@ -498,7 +494,7 @@ export default function AutoTrading() {
             <CardContent className="space-y-6">
               <div>
                 <Label className="text-indigo-200 mb-3 block font-medium">
-                  Minimum Signal Strength: <span className="text-indigo-400 font-bold">{settings.min_confidence}/100</span>
+                  Minimum indicator score: <span className="text-indigo-400 font-bold">{settings.min_confidence}/100</span>
                 </Label>
                 <Slider
                   value={[settings.min_confidence]}
@@ -508,7 +504,7 @@ export default function AutoTrading() {
                   step={5}
                   className="mb-2 [&>.relative>.bg-primary]:bg-indigo-500 [&>.block]:border-indigo-500"
                 />
-                <p className="text-xs text-indigo-300/60">Only execute trades with AI confidence above this level</p>
+                <p className="text-xs text-indigo-300/60">Only trades with an indicator score above this level. The score is not a probability: in the audit, score 95 was the worst group.</p>
               </div>
 
               <div className="bg-slate-900/50 rounded-xl p-4 border border-violet-500/30">
@@ -573,7 +569,7 @@ export default function AutoTrading() {
                       step={5}
                       className="mb-2 [&>.relative>.bg-primary]:bg-violet-500 [&>.block]:border-violet-500"
                     />
-                    <p className="text-xs text-violet-300/60">The AI must return a confidence at or above this score for the trade to proceed.</p>
+                    <p className="text-xs text-violet-300/60">The AI must return a score at or above this level for the trade to proceed.</p>
                   </div>
                 )}
               </div>
@@ -588,7 +584,7 @@ export default function AutoTrading() {
                       className="border-green-500 data-[state=checked]:bg-green-500"
                     />
                     <Label className="text-slate-300">Low Risk</Label>
-                    <Badge className="bg-green-500/20 text-green-400 ml-auto">Recommended</Badge>
+                    
                   </div>
                   <div className="flex items-center gap-2">
                     <Checkbox

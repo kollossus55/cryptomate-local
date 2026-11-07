@@ -1,0 +1,56 @@
+{
+  "name": "V6StrategyState",
+  "type": "object",
+  "properties": {
+    "strategy_id": {
+      "type": "string"
+    },
+    "name": {
+      "type": "string"
+    },
+    "version": {
+      "type": "string"
+    },
+    "timeframe": {
+      "type": "string"
+    },
+    "lifecycle": {
+      "type": "string",
+      "enum": [
+        "research",
+        "certified",
+        "paper_half",
+        "paper_full",
+        "shadow"
+      ]
+    },
+    "certificate_id": {
+      "type": "string"
+    },
+    "size_multiplier": {
+      "type": "number"
+    },
+    "forward_trades": {
+      "type": "number"
+    },
+    "forward_series": {
+      "type": "array"
+    },
+    "drift_status": {
+      "type": "string"
+    },
+    "drift_note": {
+      "type": "string"
+    },
+    "demoted_at": {
+      "type": "string"
+    },
+    "demotion_reason": {
+      "type": "string"
+    },
+    "last_signal_at": {
+      "type": "string"
+    }
+  },
+  "required": []
+}
