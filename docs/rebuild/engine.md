@@ -107,6 +107,28 @@ Wicks are not read while venues disagree, past the bound included. `state.wickFr
 the first tick with consensus reads back from there, so a wick through the stop in that window exits then, not
 on the next daily bar. A wick while venues are still apart past the bound is not acted on: the book decides.
 
+## Drawdown floor
+
+CONTRACT section 6, user-approved addition of 2026-11-07. `shared/trading/v6Floor.js` holds `FLOOR_PCT = 0.30` and
+the pure checks; no config field reaches it. The reference is `v6_state.floorHigh`, seeded from `allTimeHigh` and
+raised with every new equity high, so a ladder rebase never moves it. Only a floor reset sets it lower.
+
+Step 5 checks equity with held coins marked at their last price when unquoted. A floor reset request is applied
+first, then a re-enable request (refused with `floor_breached` while the floor is breached), then the floor
+itself. On reaching it, `v6_state.floorBreach = { at, equity, reference }` is set, a critical `floor_breached` is
+raised once, and the halt becomes `{ source: 'floor', flatten: true }` through `risk.manualHalt`, so step 9
+flattens as the ladder's -20% does. While `floorBreach` is set that halt is put back on any run that finds it
+cleared. Step 13 checks again after the fills, so a fall during the step halts now and flattens on the next run.
+
+`resetFloor` in v6Control needs the word `FLOOR`, a note, a user with an email or id, a halted risk state, a
+breach, and no position rows (quarantined and damaged rows count). It writes `V6Config.floor_reset_request`. The
+engine re-checks breach, flat, halted and the name, and raises `floor_reset_refused` if one fails; the request is
+consumed either way. On success it sets `floorHigh` to current equity, clears `floorBreach`, keeps
+`floorLastReset` and `floorResets`, and raises a critical `floor_reset` with `{ oldHigh, equity, by, note }`. The
+halt stays until a separate re-enable. `status.risk.floor` gives `pct`, `reference`, `level`, `drawdownPct`,
+`pointsAbove`, `dollarsAbove`, `breached`, `resets`, `lastReset` and `reset.{available, preconditions}`, and a
+breach adds a failing `floor` precondition to `risk.reenable`.
+
 ## Strategy code missing
 
 A held position whose strategy is not in the registry keeps its stop, trail and regime exits, but signal exits

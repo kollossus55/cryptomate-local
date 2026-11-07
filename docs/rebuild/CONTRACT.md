@@ -321,6 +321,17 @@ Numbering refers to docs/rebuild/gui-design.md section 12 and docs/rebuild/audit
 - **Rung 3 (F12).** `NEEDS_REVIEW` state accepted; the GUI says a human must re-enable.
 - **Re-enable allowance.** Each re-enable resets the equity high, so Mission Control must always
   show cumulative drawdown from the all-time high across re-enables.
+- **Permanent drawdown floor (user-approved addition, 2026-11-07).** A hard ceiling, not a
+  setting: no config field reads or loosens it. It sits at -30% from `v6_state.allTimeHigh`
+  (matching criterion D3), a high that a re-enable never rebases. When equity reaches it,
+  exactly -30% included, the engine flattens every position through the same halt as the
+  ladder's -20% flatten (exits are never blocked, stale prices included), halts, and raises a
+  critical `floor_breached`. A normal re-enable does not clear it. Only the v6Control action
+  `resetFloor` does: confirm word `FLOOR`, a note, a named human, a halted and flat account.
+  The engine re-checks those, moves the floor's reference (`v6_state.floorHigh`) to current
+  equity, and records a permanent `floor_reset` event with the old high, the equity and the
+  user. V6 stays halted until a separate re-enable. The floor is shown wherever drawdown is:
+  Mission Control, Risk Controls, and the re-enable dialog with its distance from equity.
 - **Venue health (I13).** An untried venue is `unknown`, not healthy, and never counts toward
   consensus. Share one hub instance per process so backoff is global.
 - **Trade safety (I3, F11).** Legacy delete/reset paths must not silently remove V6 trades or

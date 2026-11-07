@@ -20,6 +20,9 @@ function DrawdownTile({ risk, allTime, stale }) {
   if (isNum(risk?.worstDrawdownPct)) parts.push(`Worst ${pct(risk.worstDrawdownPct)}`);
   const note = reenableNote(allTime);
   if (note) parts.push(note);
+  const floor = risk?.floor;
+  if (floor?.breached) parts.push('Drawdown floor reached');
+  else if (isNum(floor?.pointsAbove) && isNum(floor?.level)) parts.push(`Floor ${money(floor.level)}, ${floor.pointsAbove.toFixed(1)} points away`);
 
   return (
     <StatTile

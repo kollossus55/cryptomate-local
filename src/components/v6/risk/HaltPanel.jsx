@@ -12,7 +12,7 @@ import TypedConfirmDialog from '../shared/TypedConfirmDialog';
 import { allTimeLabel } from '../shared/useAllTimeDrawdown';
 import { NEXT_TICK_NOTE, useV6Mutation } from '../shared/useV6';
 import { coin, money, pct, pnlCls, signedMoney, until, utc } from '../shared/format';
-import { panelActions, rebaseExposure, REQUEST_TEXT, reviewText, selfClearingBlocks } from './haltLogic';
+import { floorResetOffer, floorView, panelActions, rebaseExposure, REQUEST_TEXT, reviewText, selfClearingBlocks } from './haltLogic';
 
 const WRITE = { invalidates: ['status', 'events'] };
 const SIZE_TEXT = ['Full size', 'Half size', 'Quarter size', 'No new entries', 'No new entries'];
@@ -47,7 +47,7 @@ function HaltFacts({ status, mode }) {
   return (
     <>
       <p>
-        {manual ? 'You asked V6 to flatten and halt' : 'Flatten and halt triggered'} {utc(h.at)}
+        {manual ? 'You asked V6 to flatten and halt' : h.source === 'floor' ? 'The drawdown floor triggered flatten and halt' : 'Flatten and halt triggered'} {utc(h.at)}
         {typeof h.drawdownPct === 'number' ? ` at ${pct(h.drawdownPct)} drawdown` : ''}.
       </p>
       {loss !== null && (
@@ -119,14 +119,55 @@ function RebaseExposure({ exposure }) {
           )}
         </p>
       )}
+      {exposure.floorLevel === null ? (
+        <p>
+          <span className="font-semibold">Drawdown floor:</span> the level is not available right now.
+        </p>
+      ) : (
+        <p>
+          <span className="font-semibold">Drawdown floor:</span> at {money(exposure.floorLevel)}
+          {exposure.floorPointsAbove !== null && `, ${exposure.floorPointsAbove.toFixed(1)} points`}
+          {exposure.floorDollarsAbove !== null && ` (${money(exposure.floorDollarsAbove)})`} below current equity. A re-enable does
+          not move it{exposure.floorFirst ? ', and it comes before the next ladder flatten' : ''}.
+        </p>
+      )}
       <p className="text-xs text-amber-200/80">The engine sets the new high at its next run, so the level can move slightly.</p>
+    </div>
+  );
+}
+
+/** The floor's distance, for the dialog that does not rebase. */
+function FloorDistance({ floor }) {
+  const view = floorView(floor, { money, pct });
+  return <p className={view.tone === 'slate' ? 'text-slate-300' : 'text-amber-200'}>{view.line}</p>;
+}
+
+function FloorPanel({ status, onReset }) {
+  const offer = floorResetOffer(status);
+  if (!offer.show) return null;
+  return (
+    <div className="space-y-1 rounded-md border border-red-500/40 bg-red-500/10 p-3">
+      <p className="text-slate-300">Before resetting the floor:</p>
+      <ul className="space-y-1">
+        {offer.preconditions.map((p) => (
+          <li key={p.id} className="flex items-start gap-2">
+            <CheckIcon status={p.ok ? 'pass' : 'fail'} label={p.ok ? 'Met' : 'Not met'} className="mt-0.5 h-4 w-4" />
+            <span>{p.label}</span>
+          </li>
+        ))}
+      </ul>
+      <div className="flex justify-end">
+        <Button size="sm" variant="outline" className="border-red-500/50 text-red-300" disabled={!offer.available} onClick={onReset}>
+          Reset drawdown floor...
+        </Button>
+      </div>
     </div>
   );
 }
 
 function RebaseDialogBody({ status, allTime }) {
   const { account, risk } = status;
-  const exposure = rebaseExposure(allTime, account?.equity, risk.ladder?.haltPct);
+  const exposure = rebaseExposure(allTime, account?.equity, risk.ladder?.haltPct, risk.floor);
   const allowance = pct(Math.abs(risk.ladder?.haltPct), 0);
   const label = allTimeLabel(allTime, pct);
   return (
@@ -137,7 +178,8 @@ function RebaseDialogBody({ status, allTime }) {
         <li>The equity high resets to {money(account?.equity)}, so the ladder restarts from there. Without this it would stay stopped.</li>
         <li>
           That gives V6 a fresh {allowance} allowance on top of the loss so far. Your account could fall a further {allowance}{' '}
-          from here before the next halt. Repeated re-enables have no combined limit.
+          from here before the next ladder halt, or less if the drawdown floor comes first. The floor is the one limit that
+          re-enables share: it stays {pct(risk.floor?.pct ?? -30, 0)} from the high it measures from.
         </li>
         <li>
           The chart and worst-drawdown record still show the old high.
@@ -189,6 +231,7 @@ export default function HaltPanel({ status, allTime, stale }) {
   const pause = useV6Mutation('pauseEntries', WRITE);
   const flatten = useV6Mutation('flattenAll', WRITE);
   const reenable = useV6Mutation('reenable', WRITE);
+  const resetFloor = useV6Mutation('resetFloor', WRITE);
 
   const { risk, positions, headline, engine } = status;
   const actions = panelActions(status);
@@ -221,6 +264,9 @@ export default function HaltPanel({ status, allTime, stale }) {
             All-time: {label} from {money(allTime.highEquity)}. This does not reset on a re-enable.
           </p>
         )}
+
+        <FloorDistance floor={risk?.floor} />
+        <FloorPanel status={status} onReset={() => setDialog('resetFloor')} />
 
         {mode === 'normal' && risk?.blockReasons?.length > 0 && (
           <ul className="list-disc space-y-0.5 pl-5 text-slate-400">
@@ -320,8 +366,28 @@ export default function HaltPanel({ status, allTime, stale }) {
         {willRebase ? (
           <RebaseDialogBody status={status} allTime={allTime} />
         ) : (
-          <p>V6 can open paper positions again. The equity high stays where it is, so reduced size carries on as before.</p>
+          <>
+            <p>V6 can open paper positions again. The equity high stays where it is, so reduced size carries on as before.</p>
+            <FloorDistance floor={risk?.floor} />
+          </>
         )}
+      </TypedConfirmDialog>
+
+      <TypedConfirmDialog
+        open={dialog === 'resetFloor'}
+        onOpenChange={(open) => !open && setDialog(null)}
+        title="Reset the drawdown floor?"
+        word="FLOOR"
+        noteLabel="Why are you resetting the floor? (required)"
+        confirmLabel="Reset floor"
+        destructive
+        onConfirm={({ note }) => resetFloor.mutateAsync({ confirm: 'FLOOR', note }).then(done('Floor reset requested.'))}
+      >
+        <p>
+          The floor moves to {pct(risk?.floor?.pct ?? -30, 0)} below current equity of {money(status.account?.equity)}, from{' '}
+          {money(risk?.floor?.reference)} now. That allows a further fall on top of the loss so far.
+        </p>
+        <p>The old high, current equity and your name are kept as a permanent event. V6 stays halted until a separate re-enable.</p>
       </TypedConfirmDialog>
     </Card>
   );

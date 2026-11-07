@@ -7,6 +7,7 @@ import { StaleBadge } from '../shared/ToneBadge';
 import { V6Card } from '../shared/StateCard';
 import { allTimeLabel } from '../shared/useAllTimeDrawdown';
 import { DASH, money, pct, signedPct, until } from '../shared/format';
+import { floorView } from '../risk/haltLogic';
 
 const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
 
@@ -144,6 +145,18 @@ function RebasedNote({ risk, allTime }) {
   );
 }
 
+const FLOOR_CLS = {
+  red: 'border-red-500/40 bg-red-500/10 text-red-200',
+  amber: 'border-amber-500/30 bg-amber-500/10 text-amber-200',
+  slate: 'border-slate-700 bg-slate-800/40 text-slate-300',
+};
+
+/** The permanent floor sits outside the ladder: a re-enable moves the ladder, never this. */
+function FloorNote({ floor }) {
+  const view = floorView(floor, { money, pct });
+  return <p className={`rounded-md border p-2 text-xs ${FLOOR_CLS[view.tone]}`}>{view.line}</p>;
+}
+
 export default function DrawdownLadder({ risk, allTime, stale }) {
   const failSafe = risk?.halted?.source === 'fail_safe';
   const ladder = risk?.ladder;
@@ -172,6 +185,8 @@ export default function DrawdownLadder({ risk, allTime, stale }) {
       </p>
 
       <RebasedNote risk={risk} allTime={allTime} />
+
+      <FloorNote floor={risk.floor} />
 
       <div className="grid gap-3 sm:grid-cols-2">
         <LimitMeter

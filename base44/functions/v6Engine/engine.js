@@ -15,6 +15,7 @@
 
 import * as paper from './shared/v6Paper.js';
 import * as risk from './shared/v6Risk.js';
+import * as floor from './shared/v6Floor.js';
 import * as realExits from './shared/v6Exits.js';
 import {
   computeRegime, createIndicatorAccess, entryPositionFields, exitConfigFor, exitRemainderPatch, step,
@@ -74,7 +75,7 @@ async function mapLimit(items, limit, fn) {
 export function defaultConfig(venues = []) {
   return {
     id: 'v6-config', version: 1, risk: risk.clampRiskConfig(risk.DEFAULT_RISK_CONFIG), venues, roles: {}, strategies: {},
-    halt_request: null, reenable_request: null, close_requests: [], reinstate_requests: [], engine_lease: null,
+    halt_request: null, reenable_request: null, floor_reset_request: null, close_requests: [], reinstate_requests: [], engine_lease: null,
   };
 }
 
@@ -647,7 +648,58 @@ async function runOneCycle(deps, cfg, { leaseInvalid = false } = {}) {
     out.events.forEach(raise);
     consumed.add(halt.id);
   }
+  // The drawdown floor (CONTRACT section 6, 2026-11-07). Held coins without a quote this
+  // tick are marked at their last price, as the commit does.
+  const markedEquity = () => {
+    const marks = new Map(prices);
+    for (const p of ledger.positions) if (!marks.has(p.symbol)) marks.set(p.symbol, p.lastPrice);
+    return paper.ledgerEquity(ledger, marks).equity;
+  };
+  // Once reached, the floor holds a flattening halt until a floor reset, whatever else
+  // clears or rebases in between. The flatten goes through the same halt as the ladder's.
+  const holdFloor = (equity) => {
+    const reference = floor.floorReference(state);
+    if (!state.floorBreach && floor.floorReached(equity, reference)) {
+      state.floorBreach = { at: t, equity, reference };
+      raise({
+        type: 'floor_breached', severity: 'critical', code: 'floor_breached',
+        message: `Equity ${equity.toFixed(2)} reached the drawdown floor, 30% below ${reference.toFixed(2)}. Closing every position and halting. A re-enable does not clear this; only a floor reset does.`,
+        data: { equity, reference, level: floor.floorLevel(reference) },
+      });
+    }
+    if (!state.floorBreach) return;
+    if (riskState?.halt?.active && riskState.halt.flatten) return;
+    const out = risk.manualHalt(riskState, { t, reason: 'floor_breached', flatten: true });
+    const keep = out.riskState.halt.source === 'fail_safe';
+    riskState = { ...out.riskState, halt: { ...out.riskState.halt, ...(keep ? {} : { source: 'floor', reason: 'floor_breached', by: null }) } };
+  };
+  state.floorHigh ??= state.allTimeHigh ?? null;
+  const floorReset = cfg.floor_reset_request;
+  if (floorReset && !consumed.has(floorReset.id)) {
+    consumed.add(floorReset.id);
+    const open = ledger.positions.length + (ledger.quarantined?.length ?? 0);
+    const by = typeof floorReset.by === 'string' && floorReset.by.trim() ? floorReset.by : null;
+    const why = !state.floorBreach ? 'not_breached' : open > 0 ? 'not_flat' : !riskState?.halt?.active ? 'not_halted' : !by ? 'no_human_named' : null;
+    if (why) raise({ type: 'alarm', severity: 'warning', code: 'floor_reset_refused', message: `Floor reset refused: ${why}.` });
+    else {
+      const equity = markedEquity();
+      const oldHigh = floor.floorReference(state);
+      state.floorHigh = equity;
+      state.floorResets = (state.floorResets ?? 0) + 1;
+      state.floorLastReset = { at: t, by, oldHigh, equity, breach: state.floorBreach, note: floorReset.note ?? null };
+      state.floorBreach = null;
+      raise({
+        type: 'floor_reset', severity: 'critical', code: 'floor_reset',
+        message: `Drawdown floor reset by ${by}. Its reference moved from the old high ${oldHigh.toFixed(2)} to current equity ${equity.toFixed(2)}. Entries stay halted until a re-enable.`,
+        data: { oldHigh, equity, by, note: floorReset.note ?? null },
+      });
+    }
+  }
   const reenable = cfg.reenable_request;
+  if (reenable && !consumed.has(reenable.id) && state.floorBreach) {
+    raise({ type: 'alarm', severity: 'warning', code: 'reenable_refused', message: 'Re-enable refused: floor_breached. The drawdown floor needs a floor reset first.' });
+    consumed.add(reenable.id);
+  }
   if (reenable && !consumed.has(reenable.id)) {
     const equity = paper.ledgerEquity(ledger, prices).equity;
     const out = risk.humanReEnable(riskState, { t, equity, by: reenable.by, confirm: true, openPositions: ledger.positions.length + (ledger.quarantined?.length ?? 0) });
@@ -658,6 +710,7 @@ async function runOneCycle(deps, cfg, { leaseInvalid = false } = {}) {
     out.events.forEach(raise);
     consumed.add(reenable.id);
   }
+  holdFloor(markedEquity());
   for (const req of cfg.reinstate_requests ?? []) {
     if (consumed.has(req.id)) continue;
     consumed.add(req.id);
@@ -1047,6 +1100,9 @@ async function runOneCycle(deps, cfg, { leaseInvalid = false } = {}) {
   const eq = paper.ledgerEquity(ledger, marks);
   if (eq.equity > (state.allTimeHigh ?? 0) || !state.allTimeHighAt) state.allTimeHighAt = now;
   state.allTimeHigh = Math.max(state.allTimeHigh ?? eq.equity, eq.equity);
+  state.floorHigh = Math.max(state.floorHigh ?? eq.equity, eq.equity);
+  // Caught here too, so a fall during the step halts now and flattens on the next run.
+  holdFloor(eq.equity);
   const drawdownPct = state.allTimeHigh > 0 ? ((eq.equity - state.allTimeHigh) / state.allTimeHigh) * 100 : 0;
   // Kept here as well: retention thins old equity points, and the worst one could go with them.
   state.worstDrawdownPct = Math.min(state.worstDrawdownPct ?? 0, drawdownPct);
@@ -1141,6 +1197,7 @@ async function clearConsumedRequests(E, cfg, consumed) {
   const patch = {};
   if (latest.halt_request && consumed.has(latest.halt_request.id)) patch.halt_request = null;
   if (latest.reenable_request && consumed.has(latest.reenable_request.id)) patch.reenable_request = null;
+  if (latest.floor_reset_request && consumed.has(latest.floor_reset_request.id)) patch.floor_reset_request = null;
   if (latest.foreign_ack_request && consumed.has(latest.foreign_ack_request.id)) patch.foreign_ack_request = null;
   for (const key of ['close_requests', 'reinstate_requests']) {
     const left = (latest[key] ?? []).filter((r) => !consumed.has(r.id));

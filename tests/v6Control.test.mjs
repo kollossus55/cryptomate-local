@@ -256,6 +256,77 @@ await test('re-enable: NEEDS_REVIEW accepts it, and status shows the rebase', as
   assert.strictEqual(w.config().reenable_request.by, user.email);
 });
 
+console.log('\nDrawdown floor');
+
+const breachedState = (w, patch = {}) => {
+  const row = w.store.list('Portfolio', {})[0];
+  w.store.update('Portfolio', row.id, { v6_state: { ...row.v6_state, floorBreach: { at: NOW - 1000, equity: 8000, reference: 12_000 }, ...patch } });
+};
+const floorWorld = (opts) => { const w = world({ rs: riskState({ halt: halted('floor', true) }), ...opts }); breachedState(w); return w; };
+
+await test('resetFloor: the wrong word and an empty note are refused, and nothing is written', async () => {
+  const w = floorWorld();
+  assert.strictEqual((await w.call('resetFloor', { confirm: 'RE-ENABLE', note: 'x' })).code, 'CONFIRM_MISMATCH');
+  assert.strictEqual((await w.call('resetFloor', { confirm: 'floor', note: 'x' })).code, 'CONFIRM_MISMATCH');
+  assert.strictEqual((await w.call('resetFloor', { confirm: 'FLOOR', note: ' ' })).code, 'BAD_REQUEST');
+  assert.ok(!w.config()?.floor_reset_request);
+});
+
+await test('resetFloor: refused while not halted, not breached, or not flat', async () => {
+  const notHalted = world();
+  breachedState(notHalted);
+  assert.strictEqual((await notHalted.call('resetFloor', { confirm: 'FLOOR', note: 'x' })).code, 'NOT_HALTED');
+  const notBreached = world({ rs: riskState({ halt: halted('manual', true) }) });
+  assert.strictEqual((await notBreached.call('resetFloor', { confirm: 'FLOOR', note: 'x' })).code, 'NOT_BREACHED');
+  const open = floorWorld({ positions: [held] });
+  const r = await open.call('resetFloor', { confirm: 'FLOOR', note: 'x' });
+  assert.strictEqual(r.code, 'PRECONDITION_FAILED');
+  assert.ok(r.fields.flat);
+  for (const w of [notHalted, notBreached, open]) assert.ok(!w.config()?.floor_reset_request);
+});
+
+await test('resetFloor: needs a named person', async () => {
+  const w = floorWorld();
+  const r = await handle({ entities: makeBase44Shim(w.store, { getRegistry: () => null }).asServiceRole.entities, body: { action: 'resetFloor', confirm: 'FLOOR', note: 'x' }, user: { role: 'admin' }, now: NOW });
+  assert.strictEqual(r.code, 'HUMAN_REQUIRED');
+});
+
+await test('resetFloor: accepted on a flat halted breached account, logged, and shown as pending', async () => {
+  const w = floorWorld();
+  const before = await w.call('status');
+  assert.strictEqual(before.risk.floor.reset.available, true);
+  const r = await w.call('resetFloor', { confirm: 'FLOOR', note: 'reviewed' });
+  assert.strictEqual(r.ok, true);
+  assert.strictEqual(w.config().floor_reset_request.by, user.email);
+  assert.strictEqual(w.operatorEvents().at(-1).code, 'floor_reset_request');
+  const after = await w.call('status');
+  assert.strictEqual(after.risk.requestPending, 'resetFloor');
+  assert.strictEqual(after.risk.floor.reset.available, false, 'one request at a time');
+});
+
+await test('status: the floor sits 30% below the all-time high, with the distance to it', async () => {
+  const s = await world().call('status');
+  const f = s.risk.floor;
+  assert.strictEqual(f.pct, -30);
+  assert.strictEqual(f.reference, 12_000);
+  assert.ok(Math.abs(f.level - 8400) < 1e-9);
+  assert.ok(Math.abs(f.dollarsAbove - (s.account.equity - 8400)) < 1e-9);
+  assert.ok(Math.abs(f.pointsAbove - (f.drawdownPct + 30)) < 1e-9);
+  assert.strictEqual(f.breached, false);
+  assert.strictEqual(f.reset.available, false);
+});
+
+await test('status: a floor halt says so in the headline, and a re-enable is blocked', async () => {
+  const w = floorWorld();
+  const s = await w.call('status');
+  assert.strictEqual(s.headline.state, 'HALTED');
+  assert.ok(s.headline.line.includes('drawdown floor') && s.headline.line.includes('floor reset'));
+  assert.strictEqual(s.risk.floor.breached, true);
+  assert.strictEqual(s.risk.reenable.preconditions.find((p) => p.id === 'floor').ok, false);
+  assert.strictEqual((await w.call('reenable', { confirm: 'RE-ENABLE', note: 'x' })).code, 'FLOOR_BREACHED');
+  assert.strictEqual(w.config()?.reenable_request ?? null, null);
+});
+
 console.log('\nStrategies');
 
 const strategy = { id: 's1', name: 'Test', version: 1, timeframe: '1d', universe: { kind: 'top', n: 5 } };

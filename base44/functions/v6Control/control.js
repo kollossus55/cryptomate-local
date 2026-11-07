@@ -11,6 +11,7 @@
 import { randomUUID } from 'node:crypto';
 
 import * as risk from './shared/v6Risk.js';
+import * as floor from './shared/v6Floor.js';
 import { DEFAULT_HUB_CONFIG, EXCHANGES } from './shared/v6Exchanges.js';
 
 const TICK_MIN = 5;
@@ -114,14 +115,43 @@ const damagedPositions = (row) => row?.positions != null && !Array.isArray(row.p
 // A list that cannot be read is not flat, so the damaged value stands in as one row.
 const positionRows = (row) => (damagedPositions(row) ? [row.positions] : row?.positions ?? []);
 
-function reenableInfo(rs, positions, cfg) {
+function reenableInfo(rs, positions, cfg, state) {
   const preview = risk.reEnablePreview(rs, { openPositions: positions.length });
   const flat = positions.length === 0;
   const preconditions = preview.willRebase ? [
     { id: 'flat', label: 'No positions open', ok: flat },
     { id: 'no_flatten', label: 'No flatten pending', ok: flat || !(cfg.halt_request?.flatten || rs?.halt?.flatten) },
   ] : [];
+  // A re-enable never clears the floor; the engine refuses it too.
+  if (state?.floorBreach) preconditions.push({ id: 'floor', label: 'Drawdown floor reset first', ok: false });
   return { available: preview.allowed, reason: preview.reason, willRebase: preview.willRebase, preconditions };
+}
+
+// Points, not a fraction: 0.30 * 100 is not exactly 30 in floating point.
+const FLOOR_POINTS = Math.round(floor.FLOOR_PCT * 1e6) / 1e4;
+
+/** The permanent drawdown floor (CONTRACT section 6, 2026-11-07). Read only: no action sets it. */
+function floorInfo(state, equity, rs, positions, cfg) {
+  const reference = floor.floorReference(state);
+  const level = floor.floorLevel(reference);
+  const known = level !== null && typeof equity === 'number' && Number.isFinite(equity);
+  const drawdownPct = known ? (equity / reference - 1) * 100 : null;
+  const breach = state?.floorBreach ?? null;
+  const last = state?.floorLastReset ?? null;
+  const preconditions = [
+    { id: 'breached', label: 'The floor has been reached', ok: Boolean(breach) },
+    { id: 'halted', label: 'V6 is halted', ok: rs?.halt?.active === true },
+    { id: 'flat', label: 'No positions open', ok: positions.length === 0 },
+  ];
+  return {
+    pct: -FLOOR_POINTS, reference, level, drawdownPct,
+    pointsAbove: known ? drawdownPct + FLOOR_POINTS : null,
+    dollarsAbove: known ? equity - level : null,
+    breached: Boolean(breach), breachedAt: breach?.at ?? null, breachEquity: breach?.equity ?? null,
+    resets: state?.floorResets ?? 0,
+    lastReset: last ? { at: last.at, by: last.by, oldHigh: last.oldHigh, equity: last.equity } : null,
+    reset: { available: preconditions.every((p) => p.ok) && !cfg?.floor_reset_request, preconditions },
+  };
 }
 
 // --- headline ----------------------------------------------------------------
@@ -141,6 +171,9 @@ export function deriveHeadline({ now, lastTickAt, rs, positions, lifecycles, equ
     return row('ENGINE_DOWN', 'ENGINE NOT RUNNING', `${ago} Stops are not being checked.`, 'red');
   }
   if (!rs || rs.halt?.source === 'fail_safe') return row('HALTED', 'HALTED', 'Stored risk state could not be read. Halted until you re-enable.', 'red');
+  if (rs.halt?.active && rs.halt.source === 'floor') {
+    return row('HALTED', 'HALTED', `Equity reached the drawdown floor, ${FLOOR_POINTS}% below its high. Positions are closed and V6 is halted. A re-enable does not clear this; a floor reset in Risk Controls does.`, 'red');
+  }
   if (rs.rung === 4 || rs.halt?.flatten || (rs.halt?.active && rs.halt.source !== 'manual')) {
     return row('HALTED', 'HALTED', `Halted at ${(-pct(rs.drawdown)).toFixed(1)}% drawdown. Needs your review in Risk Controls.`, 'red');
   }
@@ -281,7 +314,7 @@ async function status({ E, now, registry }) {
   const lastBtc = (await E.V6EquityPoint.list('-t', 1))[0]?.btc_price;
   const btcReturnPct = firstBtc > 0 && lastBtc > 0 ? ((lastBtc - firstBtc) / firstBtc) * 100 : null;
   const equityReturnPct = startingEquity > 0 && equity !== null ? ((equity - startingEquity) / startingEquity) * 100 : null;
-  const pending = cfg.halt_request ? (cfg.halt_request.flatten ? 'flatten' : 'pause') : cfg.reenable_request ? 'reenable' : null;
+  const pending = cfg.halt_request ? (cfg.halt_request.flatten ? 'flatten' : 'pause') : cfg.reenable_request ? 'reenable' : cfg.floor_reset_request ? 'resetFloor' : null;
   const allTimeHigh = state?.allTimeHigh ?? null;
   const count = (fn) => stateRows.filter(fn).length;
   const anySetting = (field) => settings.some((s) => Boolean(s?.[field])); // as the engine reads is_enabled
@@ -334,7 +367,8 @@ async function status({ E, now, registry }) {
         source: rs.halt.source, at: rs.halt.at, by: rs.halt.by, reason: rs.halt.reason, flatten: rs.halt.flatten,
         drawdownPct: -pct(rs.drawdown ?? 0), peakEquity: rs.equityHigh, equity,
       } : null,
-      reenable: reenableInfo(rs, positionRows(row), cfg), // raw rows: quarantined ones are not flat
+      reenable: reenableInfo(rs, positionRows(row), cfg, state), // raw rows: quarantined ones are not flat
+      floor: floorInfo(state, equity, rs, positionRows(row), cfg),
     },
     positions,
     positionsDamaged,
@@ -701,7 +735,8 @@ async function flattenAll({ E, now, body, user }) {
 
 async function reenable({ E, now, body, user }) {
   const [cfg, row] = await Promise.all([config(E), account(E)]);
-  const info = reenableInfo(riskOf(row), positionRows(row), cfg);
+  if (row?.v6_state?.floorBreach) return refuse('FLOOR_BREACHED', 'The drawdown floor was reached. A re-enable cannot clear it; reset the floor first.');
+  const info = reenableInfo(riskOf(row), positionRows(row), cfg, row?.v6_state);
   if (!info.available) {
     if (info.reason === 'nothing_to_clear') return refuse('NOT_HALTED', 'There is nothing to clear.');
     return refuse('PRECONDITION_FAILED', 'This cannot be cleared while positions are open.', { flat: 'No positions open' });
@@ -714,6 +749,26 @@ async function reenable({ E, now, body, user }) {
   await E.V6Config.update(cfg.id, { reenable_request: req });
   await operatorEvent(E, now, user, 'reenable', 'Re-enable requested.', null, req);
   return { ok: true, asOf: now, effective: 'next_tick', requestedAt: now, willRebase: info.willRebase };
+}
+
+/**
+ * The only way to clear a reached drawdown floor. A normal re-enable cannot. The engine
+ * re-checks every condition when it applies the request, and records the old high.
+ */
+async function resetFloor({ E, now, body, user }) {
+  if (body.confirm !== 'FLOOR') return refuse('CONFIRM_MISMATCH', 'Type FLOOR to confirm.');
+  if (typeof body.note !== 'string' || !body.note.trim()) return refuse('BAD_REQUEST', 'A note is required.');
+  const named = (v) => typeof v === 'string' && v.trim() !== '';
+  if (!named(user?.email) && !named(user?.id)) return refuse('HUMAN_REQUIRED', 'Only a signed-in person can reset the floor.');
+  const [cfg, row] = await Promise.all([config(E), account(E)]);
+  const state = row?.v6_state ?? null;
+  if (riskOf(row)?.halt?.active !== true) return refuse('NOT_HALTED', 'V6 is not halted, so there is nothing to reset.');
+  if (!state?.floorBreach) return refuse('NOT_BREACHED', 'The drawdown floor has not been reached.');
+  if (positionRows(row).length) return refuse('PRECONDITION_FAILED', 'The floor can only be reset on a flat account.', { flat: 'No positions open' });
+  const req = request(now, user, { note: body.note.trim() });
+  await E.V6Config.update(cfg.id, { floor_reset_request: req });
+  await operatorEvent(E, now, user, 'floor_reset_request', 'Drawdown floor reset requested.', { reference: floor.floorReference(state), breach: state.floorBreach }, req);
+  return { ok: true, asOf: now, effective: 'next_tick', requestedAt: now };
 }
 
 async function setStrategyEnabled({ E, now, body, user, registry, gateModule }) {
@@ -837,7 +892,7 @@ async function recutover({ E, now, body, user }) {
 
 export const ACTIONS = {
   status, equityCurve, decisions, events, strategies, strategyDetail, signalTests, signalTest, riskConfig, exchanges, consensus,
-  setRiskConfig, resetRiskConfig, pauseEntries, flattenAll, reenable, setStrategyEnabled, returnFromShadow, setSleeves,
+  setRiskConfig, resetRiskConfig, pauseEntries, flattenAll, reenable, resetFloor, setStrategyEnabled, returnFromShadow, setSleeves,
   setExchanges, testExchange, ackEvent, recutover,
 };
 

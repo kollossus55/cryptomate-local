@@ -41,6 +41,9 @@
     "recutover_request": {
       "type": "object"
     },
+    "floor_reset_request": {
+      "type": "object"
+    },
     "foreign_ack_request": {
       "type": "object"
     }

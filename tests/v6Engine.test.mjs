@@ -1580,6 +1580,151 @@ await test('entity names in any case reach one cache and one file', async () => 
   assert.strictEqual(store.canonicalName('v6cONFIG'), 'V6Config');
 });
 
+console.log('\nDrawdown floor (CONTRACT section 6, 2026-11-07)');
+
+const ADMIN = { email: 'admin@test.local', role: 'admin' };
+const control = (w, action, body = {}) => handleControl({ entities: w.E, body: { action, ...body }, user: ADMIN, hub: w.hub, now: w.clock.now });
+const cash = (amount) => ({ available_balance: amount, total_balance: amount, positions_value: 0, positions: [], total_trades: 0, total_profit_loss: 0 });
+const v6Config = (w) => w.store.list('V6Config', {})[0];
+const requestOf = (w, key, extra = {}) => w.store.update('V6Config', v6Config(w).id, { [key]: { id: `${key}-${w.clock.now}`, at: w.clock.now, by: 'admin@test.local', ...extra } });
+
+/** A flat account at 7,000 whose floor reference is 10,000: exactly 30% down. */
+async function atTheFloor() {
+  const w = await world({ gate: realGate, portfolio: cash(7000) });
+  await w.run();
+  patchState(w, { allTimeHigh: 10_000, floorHigh: 10_000 });
+  w.tick();
+  await w.run();
+  return w;
+}
+
+await test('floor: exactly -30% from the all-time high halts, flattening, with a critical floor_breached', async () => {
+  const w = await atTheFloor();
+  const state = w.account().v6_state;
+  assert.strictEqual(state.floorBreach.equity, 7000);
+  assert.strictEqual(state.floorBreach.reference, 10_000);
+  assert.deepStrictEqual([state.riskState.halt.active, state.riskState.halt.flatten, state.riskState.halt.source], [true, true, 'floor']);
+  const [e] = w.riskEvents('floor_breached');
+  assert.strictEqual(e.severity, 'critical');
+  assert.strictEqual(e.sticky, true);
+  w.tick();
+  await w.run();
+  assert.strictEqual(w.riskEvents('floor_breached').length, 1, 'recorded once, not every run');
+
+  const above = await world({ gate: realGate, portfolio: cash(7000.01) });
+  await above.run();
+  patchState(above, { allTimeHigh: 10_000, floorHigh: 10_000 });
+  above.tick();
+  await above.run();
+  assert.strictEqual(above.account().v6_state.floorBreach ?? null, null, 'one cent above the floor is not the floor');
+  assert.strictEqual(above.account().v6_state.riskState.halt.active, false);
+});
+
+await test('floor: a one-bar jump past it closes the position the same run, though its stop was not touched', async () => {
+  const w = await holding();
+  const p = position(w);
+  const before = w.account().total_balance;
+  // 3 dollars per coin above the floor, then a 7 dollar fall: the stop at 90 is not reached.
+  patchState(w, { floorHigh: (before - p.quantity * 3) / 0.7 });
+  w.tick();
+  w.hub.prices.ETHUSDT = 93;
+  const r = await w.run();
+  assert.strictEqual(r.held, 0, 'the floor flatten must close it');
+  const state = w.account().v6_state;
+  assert.ok(state.floorBreach.equity < state.floorBreach.reference * 0.7, 'the breach is recorded past the level');
+  assert.strictEqual(state.riskState.halt.source, 'floor');
+  assert.strictEqual(sells(w.store).length, 1);
+  assert.ok(sells(w.store)[0].price > 90, 'filled near 93, not at the stop');
+  assertReconciled(w);
+});
+
+await test('floor: the flatten still runs with stale prices, when no venue answers', async () => {
+  const w = await holding();
+  patchState(w, { floorHigh: w.account().total_balance / 0.69 });
+  w.hub.down = true;
+  w.tick();
+  const r = await w.run();
+  assert.ok(w.account().v6_state.floorBreach, 'reached on the last good price');
+  assert.strictEqual(r.held, 0, 'exits are never blocked');
+  assertReconciled(w);
+});
+
+await test('floor: a normal re-enable does not clear it, in the engine or in v6Control', async () => {
+  const w = await atTheFloor();
+  const refused = await control(w, 'reenable', { confirm: 'RE-ENABLE', note: 'try' });
+  assert.strictEqual(refused.code, 'FLOOR_BREACHED');
+  const status = await control(w, 'status');
+  assert.strictEqual(status.risk.floor.breached, true);
+  assert.strictEqual(status.risk.reenable.preconditions.find((c) => c.id === 'floor').ok, false);
+  // A request written past the control, straight into the config, is refused by the engine.
+  requestOf(w, 'reenable_request');
+  w.tick();
+  await w.run();
+  const state = w.account().v6_state;
+  assert.strictEqual(state.riskState.halt.active, true);
+  assert.ok(state.floorBreach);
+  assert.ok(w.riskEvents('reenable_refused').some((e) => e.message.includes('floor_breached')));
+  assert.strictEqual(v6Config(w).reenable_request, null, 'the refused request is consumed');
+  assert.strictEqual(state.reenables ?? 0, 0);
+});
+
+await test('floor: a reset refused by the engine changes nothing (positions open)', async () => {
+  const w = await holding();
+  patchState(w, { floorBreach: { at: w.clock.now, equity: 1, reference: 2 }, floorHigh: 20_000 });
+  requestOf(w, 'floor_reset_request', { note: 'x' });
+  w.tick();
+  await w.run();
+  // The request is read before the run's exits, while the position is still open.
+  const state = w.account().v6_state;
+  assert.ok(w.riskEvents('floor_reset_refused').some((e) => e.message.includes('not_flat')));
+  assert.ok(state.floorBreach, 'still breached');
+  assert.strictEqual(state.floorHigh, 20_000);
+  assert.strictEqual(w.account().positions.length, 0, 'the held breach flattened it in the same run');
+  assert.strictEqual(v6Config(w).floor_reset_request, null, 'consumed, so a later flat run does not apply it');
+});
+
+await test('floor: resetFloor on a flat halted account moves the reference and records the old high, equity and user', async () => {
+  const w = await atTheFloor();
+  const r = await control(w, 'resetFloor', { confirm: 'FLOOR', note: 'reviewed the losses' });
+  assert.strictEqual(r.ok, true, JSON.stringify(r));
+  w.tick();
+  await w.run();
+  const state = w.account().v6_state;
+  assert.strictEqual(state.floorHigh, 7000);
+  assert.strictEqual(state.floorBreach, null);
+  assert.strictEqual(state.riskState.halt.active, true, 'still halted until a re-enable');
+  const [e] = w.riskEvents('floor_reset');
+  assert.deepStrictEqual([e.data.oldHigh, e.data.equity, e.data.by, e.sticky], [10_000, 7000, 'admin@test.local', true]);
+  assert.strictEqual(state.allTimeHigh, 10_000, 'the all-time high is untouched');
+  const { willRebase } = (await control(w, 'status')).risk.reenable;
+  const back = await control(w, 'reenable', { confirm: willRebase ? 'RE-ENABLE' : 'RESUME', note: 'ok' });
+  assert.strictEqual(back.ok, true, JSON.stringify(back));
+  w.tick();
+  await w.run();
+  assert.strictEqual(w.account().v6_state.riskState.halt.active, false);
+});
+
+await test('floor: a breach survives a restart and a reloaded store', async () => {
+  const w = await atTheFloor();
+  const store = new EntityStore(path.dirname(w.store.dir));
+  const E2 = makeBase44Shim(store, { getRegistry: () => null }).asServiceRole.entities;
+  w.tick();
+  await w.run({ entities: E2 });
+  const state = store.list('Portfolio', {})[0].v6_state;
+  assert.strictEqual(state.floorBreach.reference, 10_000);
+  assert.strictEqual(state.floorHigh, 10_000);
+  assert.deepStrictEqual([state.riskState.halt.active, state.riskState.halt.source], [true, 'floor']);
+});
+
+await test('floor: there is no config field for it, and a risk config cannot move it', async () => {
+  const w = await atTheFloor();
+  const cfg = v6Config(w);
+  w.store.update('V6Config', cfg.id, { risk: { ...cfg.risk, ladderHaltPct: 0.5, floorPct: 0.9 }, floorPct: 0.9 });
+  const status = await control(w, 'status');
+  assert.strictEqual(status.risk.floor.pct, -30);
+  assert.ok(!JSON.stringify((await control(w, 'riskConfig'))).includes('floor'), 'not offered as a setting');
+});
+
 for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

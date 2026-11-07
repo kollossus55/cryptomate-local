@@ -3,7 +3,7 @@
 import { DEFAULT_RISK_CONFIG, HARD_CEILINGS, clampRiskConfig } from '../shared/trading/v6Risk.js';
 import { buildFields, defaultsDiff, direction, evaluateDrafts, fieldMeta, formatLimit, parseInput, toInput } from '../src/components/v6/risk/limitLogic.js';
 import { LIMIT_META } from '../src/components/v6/risk/limitMeta.js';
-import { panelActions, panelMode, rebaseExposure, recutoverOffer, reviewText, selfClearingBlocks } from '../src/components/v6/risk/haltLogic.js';
+import { floorResetOffer, floorView, panelActions, panelMode, rebaseExposure, recutoverOffer, reviewText, selfClearingBlocks } from '../src/components/v6/risk/haltLogic.js';
 import { deriveAllTime } from '../src/components/v6/shared/allTimeLogic.js';
 import { axisFor } from '../src/components/v6/mission/chartAxis.js';
 import { RISK_META } from '../base44/functions/v6Control/control.js';
@@ -125,6 +125,43 @@ eq('API figure wins', deriveAllTime({ account: acct, risk: { allTime: { drawdown
 eq('curve fallback survives a rebased peak', Math.round(deriveAllTime({ account: acct, risk: { peakEquity: 9500 } }, { points: [{ t: 1, equity: 12000 }] }).drawdownPct), -25);
 eq('thinned curve is flagged at-least', deriveAllTime({ account: acct, risk: {} }, { points: [{ t: 1, equity: 12000 }], downsampled: true }).atLeast, true);
 eq('fail safe shows no figure', deriveAllTime({ account: acct, risk: { halted: { source: 'fail_safe' } } }, { points: [] }).known, false);
+
+// Drawdown floor (CONTRACT section 6, 2026-11-07).
+const fmt = { money: (v) => `$${Math.round(v)}`, pct: (v, d = 1) => `${v.toFixed(d)}%` };
+const floorAt = (patch = {}) => ({ pct: -30, reference: 12000, level: 8400, drawdownPct: -20, pointsAbove: 10, dollarsAbove: 1200, breached: false,
+  reset: { available: false, preconditions: [{ id: 'breached', ok: false }, { id: 'halted', ok: false }, { id: 'flat', ok: true }] }, ...patch });
+const far = floorView(floorAt(), fmt);
+eq('floor: distance in points and dollars', far.line.includes('10.0 points ($1200) above it') && far.line.includes('$8400') && far.line.includes('-30%'), true);
+eq('floor: far is neutral', far.tone, 'slate');
+eq('floor: within 5 points turns amber', floorView(floorAt({ pointsAbove: 4.9 }), fmt).tone, 'amber');
+const reached = floorView(floorAt({ breached: true, breachEquity: 8350 }), fmt);
+eq('floor: reached is red and says a re-enable does not clear it', [reached.tone, reached.line.includes('A re-enable does not clear this')], ['red', true]);
+eq('floor: unknown level shows no figure', floorView({ breached: false }, fmt).known, false);
+eq('floor: missing floor does not throw', floorView(undefined, fmt).line.length > 0, true);
+const banned = /guarantee|\bsure\b|safe bet|risk-free|proven|confidence|strength|accuracy|smart|recommended/i;
+eq('floor: wording has no banned words', [far, reached, floorView(null, fmt)].some((v) => banned.test(v.line)), false);
+// Re-enable dialog: the floor's distance is part of the exposure, and which comes first.
+const withFloor = rebaseExposure({ known: true, drawdownPct: -25, highEquity: 12000, reenables: 1 }, 9000, -20, floorAt({ pointsAbove: 5, dollarsAbove: 600 }));
+eq('dialog: floor level and distance', [withFloor.floorLevel, withFloor.floorPointsAbove, withFloor.floorDollarsAbove], [8400, 5, 600]);
+eq('dialog: floor at 8400 comes before the ladder flatten at 7200', withFloor.floorFirst, true);
+eq('dialog: ladder first when it is higher', rebaseExposure({ known: true, drawdownPct: 0, highEquity: 12000 }, 12000, -20, floorAt()).floorFirst, false);
+eq('dialog: no floor known', rebaseExposure({ known: true, drawdownPct: 0, highEquity: 12000 }, 12000, -20).floorLevel, null);
+// Re-enable is disabled by the server's floor precondition; reset follows the server and any pending request.
+const floorHalt = {
+  headline: { state: 'HALTED' },
+  positions: [],
+  risk: {
+    halted: { source: 'floor', flatten: true },
+    reenable: { available: true, willRebase: false, preconditions: [{ id: 'floor', label: 'Drawdown floor reset first', ok: false }] },
+    floor: floorAt({ breached: true, reset: { available: true, preconditions: [{ id: 'breached', ok: true }, { id: 'halted', ok: true }, { id: 'flat', ok: true }] } }),
+  },
+};
+eq('floor halt renders halted', panelMode(floorHalt), 'halted');
+eq('floor halt: re-enable disabled', panelActions(floorHalt).canReenable, false);
+eq('floor halt: reset offered', floorResetOffer(floorHalt), { show: true, available: true, preconditions: floorHalt.risk.floor.reset.preconditions });
+eq('floor reset: not while a request is pending', floorResetOffer({ ...floorHalt, risk: { ...floorHalt.risk, requestPending: 'resetFloor' } }).available, false);
+eq('floor reset: not when a check fails', floorResetOffer({ ...floorHalt, risk: { ...floorHalt.risk, floor: floorAt({ breached: true, reset: { available: true, preconditions: [{ id: 'flat', ok: false }] } }) } }).available, false);
+eq('floor reset: hidden when not reached', floorResetOffer({ risk: { floor: floorAt() } }).show, false);
 
 console.log(fails ? `${fails} FAILED` : 'all logic checks passed');
 process.exitCode = fails ? 1 : 0;
