@@ -3,7 +3,7 @@
 // One run checks every coin on every enabled venue at the same moment and records, per coin,
 // the best "buy on the cheapest venue, sell on the dearest" result for a given trade size,
 // after standard taker fees. It reads public order books only; it never touches the paper
-// ledger, the engine or any API key. Run by the CryptoMateArbLog scheduled task until END.
+// ledger, the engine or any API key. Run every 2 minutes by the app scheduler (server/scheduler.js, job arbLogger).
 //
 //   node scripts/v6/arb-logger.mjs            one run, appends to data/research/arb/gaps-YYYY-MM-DD.jsonl
 //   node scripts/v6/arb-logger.mjs --summary  summarise everything logged so far
@@ -15,7 +15,8 @@ import { createMarketHub, estimateSlippage } from '../../shared/trading/v6Exchan
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const OUT = join(ROOT, 'data', 'research', 'arb');
-const END = Date.parse('2026-11-14T18:00:00Z');
+// No end date: it runs while the app runs (about 3 MB of data a day). Remove the arbLogger job in server/scheduler.js to stop it.
+const END = Infinity;
 
 // Standard (non-VIP) spot taker fees. Withdrawal and rebalancing costs are NOT included,
 // so a "net positive" gap here is an upper bound on what could be captured.
