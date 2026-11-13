@@ -5,7 +5,7 @@
  *   node scripts/v6/fetch-spot.mjs --discover
  *   node scripts/v6/fetch-spot.mjs --fetch --phase dev --tf 1d,4h
  *   node scripts/v6/fetch-spot.mjs --build --phase dev --tf 1d
- *   node scripts/v6/fetch-spot.mjs --fetch --phase holdout --tf 1d,4h,1h --refresh   (extend to the latest closed bar)
+ *   node scripts/v6/fetch-spot.mjs --fetch --phase holdout --tf 1d,4h,1h --refresh   (extend to HOLDOUT_END, 2026-11-13)
  *
  * Public endpoints only. Resumable: raw files are appended page by page, and a
  * rerun continues from each file's last bar. Holdout bars are written and counted,
@@ -14,7 +14,7 @@
 import { appendFileSync, closeSync, existsSync, ftruncateSync, mkdirSync, openSync, readFileSync, readSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { HOLDOUT_START, TF_MS, isExcludedSymbol } from '../../shared/trading/v6Bars.js';
+import { HOLDOUT_END, HOLDOUT_START, TF_MS, isExcludedSymbol } from '../../shared/trading/v6Bars.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const STORE = path.join(ROOT, 'data', 'research', 'v6');
@@ -148,7 +148,8 @@ async function fetchSymbol(symbol, tf, phase) {
   const file = rawFile(phase, tf, symbol);
   mkdirSync(path.dirname(file), { recursive: true });
   const last = resumePoint(file);
-  const end = phase === 'dev' ? HOLDOUT_START - 1 : Date.now();
+  // The holdout closed at 2026-11-13 (CONTRACT amendment); later bars belong to the forward test.
+  const end = phase === 'dev' ? HOLDOUT_START - 1 : Math.min(Date.now(), HOLDOUT_END);
   let start = last !== null ? last + TF_MS[tf] : phase === 'dev' ? 0 : HOLDOUT_START;
   for (;;) {
     const res = await politeGet(`${API}/klines?symbol=${symbol}&interval=${tf}&limit=1000&startTime=${start}&endTime=${end}`);

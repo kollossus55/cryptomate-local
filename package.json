@@ -13,7 +13,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "node tests/auth.test.mjs && node tests/totp.test.mjs && node tests/functionRuntime.test.mjs && node tests/reset.test.mjs && node tests/committee.test.mjs && node tests/strategyLab.test.mjs && node tests/v6Bars.test.mjs && node tests/v6Control.test.mjs && node tests/v6Core.test.mjs && node tests/v6Derivs.test.mjs && node tests/v6Engine.test.mjs && node tests/v6ServerGuards.test.mjs && node tests/v6Exchanges.test.mjs && node tests/v6Exits.test.mjs && node tests/v6GuiExchanges.test.mjs && node tests/v6Paper.test.mjs && node tests/v6PaperLock.test.mjs && node tests/v6Risk.test.mjs && node tests/v6Sim.test.mjs && node tests/v6Stats.test.mjs && node tests/v6GuiMission.test.mjs && node tests/v6SignalGate.test.mjs",
+    "test": "node tests/auth.test.mjs && node tests/totp.test.mjs && node tests/functionRuntime.test.mjs && node tests/reset.test.mjs && node tests/committee.test.mjs && node tests/strategyLab.test.mjs && node tests/v6Bars.test.mjs && node tests/v6Forward.test.mjs && node tests/v6Control.test.mjs && node tests/v6Core.test.mjs && node tests/v6Derivs.test.mjs && node tests/v6Engine.test.mjs && node tests/v6ServerGuards.test.mjs && node tests/v6Exchanges.test.mjs && node tests/v6Exits.test.mjs && node tests/v6GuiExchanges.test.mjs && node tests/v6Paper.test.mjs && node tests/v6PaperLock.test.mjs && node tests/v6Risk.test.mjs && node tests/v6Sim.test.mjs && node tests/v6Stats.test.mjs && node tests/v6GuiMission.test.mjs && node tests/v6SignalGate.test.mjs",
     "sync:functions": "node scripts/sync-shared.mjs",
     "doctor": "node scripts/doctor.js",
     "compare:committee": "node scripts/compare-committee.mjs"

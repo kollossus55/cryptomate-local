@@ -3,7 +3,8 @@
  *
  * Files are written by scripts/v6/fetch-spot.mjs, one per timeframe and symbol:
  *   data/research/v6/dev/<tf>/<SYMBOL>.bin       bars with t <  HOLDOUT_START
- *   data/research/v6/holdout/<tf>/<SYMBOL>.bin   bars with t >= HOLDOUT_START
+ *   data/research/v6/holdout/<tf>/<SYMBOL>.bin   bars with t >= HOLDOUT_START (read up to HOLDOUT_END)
+ *   data/research/v6-forward/forward/<tf>/<SYMBOL>.bin   live bars for the forward test only
  * A .bin is little-endian Float64 rows of [t,o,h,l,c,v,qv]: exact prices, and far
  * faster to load than JSON, which matters for repeated research runs.
  *
@@ -22,6 +23,11 @@ import { fileURLToPath } from 'node:url';
 export const HOLDOUT_START = Date.UTC(2025, 0, 1);
 export const HOLDOUT_TOKEN_SHA256 = '132e23ac759b080970d2f5035f03ec0eda73ec6cc6ae312b3b1fe9066e60d817';
 export const DEV_END = HOLDOUT_START - 1;
+// CONTRACT section 2, amendment 2026-11-13: the holdout is closed at 2026-11-13 and a separate
+// forward window starts the next day. Only scripts/v6/forward-test.mjs opens the forward view.
+export const HOLDOUT_END = Date.UTC(2026, 10, 14) - 1;
+export const FORWARD_START = HOLDOUT_END + 1;
+export const FORWARD_REVIEW = Date.UTC(2027, 4, 14);
 export const DAY_MS = 86400000;
 export const TF_MS = { '1h': 3600000, '4h': 14400000, '1d': DAY_MS };
 export const MIN_HISTORY_DAYS = 200;
@@ -84,8 +90,25 @@ const dataEndCache = new Map();
 /** Points the store at another folder (tests use a fixture) and drops every cache. */
 export function configureBarStore({ dir = null } = {}) {
   storeDirOverride = dir;
+  forwardView = false;
   clearBarCache();
 }
+
+let forwardView = false;
+
+/**
+ * Switches this process to the forward store: only <dir>/forward/<tf>/ is read, never dev or
+ * holdout files, and any time may be asked for. For the forward test only; a test bans it
+ * from research scripts. Bars before FORWARD_START in that store are indicator warmup.
+ */
+export function openForwardView({ dir } = {}) {
+  if (!dir) throw new Error('openForwardView needs the forward store directory');
+  storeDirOverride = dir;
+  forwardView = true;
+  clearBarCache();
+}
+
+export const isForwardView = () => forwardView;
 
 export function clearBarCache() {
   for (const c of [barCache, listCache, indexCache, dataEndCache]) c.clear();
@@ -112,6 +135,10 @@ export function isHoldoutUnlocked() {
 
 function assertAllowed(t, what) {
   if (typeof t !== 'number' || Number.isNaN(t)) throw new TypeError(`${what} must be a time in ms, got ${t}`);
+  if (forwardView) return;
+  if (t > HOLDOUT_END && t !== Infinity && isHoldoutUnlocked()) {
+    throw new Error(`${what} is past the holdout, which ends 2026-11-13. Later bars belong to the forward test.`);
+  }
   if (t >= HOLDOUT_START && !isHoldoutUnlocked()) {
     throw new Error(`${what} reaches into the locked holdout (2025-01-01 onward). Research runs stop at DEV_END.`);
   }
@@ -121,7 +148,7 @@ function assertTimeframe(timeframe) {
   if (!TF_MS[timeframe]) throw new Error(`Unknown timeframe ${timeframe}. Use 1d, 4h or 1h.`);
 }
 
-const viewParts = () => (isHoldoutUnlocked() ? ['dev', 'holdout'] : ['dev']);
+const viewParts = () => (forwardView ? ['forward'] : isHoldoutUnlocked() ? ['dev', 'holdout'] : ['dev']);
 const barFile = (part, timeframe, symbol) => path.join(storeDir(), part, timeframe, `${symbol}.bin`);
 
 function readPart(part, timeframe, symbol) {
@@ -142,8 +169,12 @@ function readPart(part, timeframe, symbol) {
 }
 
 function viewBars(timeframe, symbol) {
+  if (forwardView) return readPart('forward', timeframe, symbol);
   const dev = readPart('dev', timeframe, symbol);
-  return isHoldoutUnlocked() ? dev.concat(readPart('holdout', timeframe, symbol)) : dev;
+  if (!isHoldoutUnlocked()) return dev;
+  const key = `holdout-to-end/${timeframe}/${symbol}`;
+  if (!barCache.has(key)) barCache.set(key, readPart('holdout', timeframe, symbol).filter((b) => b.t <= HOLDOUT_END));
+  return dev.concat(barCache.get(key));
 }
 
 /** First index with bars[i].t >= t. */
@@ -180,7 +211,7 @@ export function listSymbols({ timeframe = '1d' } = {}) {
  */
 export function loadBars({ symbols, timeframe, from = 0, to } = {}) {
   assertTimeframe(timeframe);
-  const end = to === undefined ? (isHoldoutUnlocked() ? Infinity : DEV_END) : Number(to);
+  const end = to === undefined ? (forwardView ? Infinity : isHoldoutUnlocked() ? HOLDOUT_END : DEV_END) : Number(to);
   const start = Number(from);
   assertAllowed(end, 'loadBars `to`');
   assertAllowed(start, 'loadBars `from`');

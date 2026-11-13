@@ -4,7 +4,7 @@
  */
 import assert from 'node:assert';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -177,6 +177,50 @@ await test('the right token opens the holdout, and DEV answers do not change', a
     assert.ok(m.listSymbols().includes('NEWUSDT'));
   } finally { delete process.env.V6_HOLDOUT_UNLOCK; }
   assert.throws(() => m.loadBars({ timeframe: '1d', to: HOLDOUT_START }), /holdout/);
+});
+
+console.log('holdout end and forward view');
+await test('an unlocked holdout stops at HOLDOUT_END (2026-11-13), whatever the file holds', async () => {
+  const src = readFileSync(fileURLToPath(new URL('../shared/trading/v6Bars.js', import.meta.url)), 'utf8');
+  const hash = createHash('sha256').update('test-token').digest('hex');
+  const copy = path.join(tmp, 'v6BarsEnd.mjs');
+  writeFileSync(copy, src.replace(bars.HOLDOUT_TOKEN_SHA256, hash));
+  const m = await import(pathToFileURL(copy).href);
+  const dir = path.join(tmp, 'store-end');
+  writeSeries(dir, 'dev', 'BTCUSDT', day(2024, 1, 1), day(2024, 12, 31), () => 9e9);
+  writeSeries(dir, 'holdout', 'BTCUSDT', day(2025, 1, 1), day(2027, 1, 1), () => 9e9);
+  m.configureBarStore({ dir });
+  process.env.V6_HOLDOUT_UNLOCK = 'test-token';
+  try {
+    assert.strictEqual(m.loadBars({ symbols: ['BTCUSDT'], timeframe: '1d' }).get('BTCUSDT').at(-1).t, day(2026, 11, 13));
+    assert.strictEqual(m.loadBars({ symbols: ['BTCUSDT'], timeframe: '1d', to: Infinity }).get('BTCUSDT').at(-1).t, day(2026, 11, 13));
+    assert.throws(() => m.loadBars({ timeframe: '1d', to: m.FORWARD_START }), /forward test/);
+    assert.throws(() => m.pointInTimeUniverse(day(2026, 12, 1)), /forward test/);
+  } finally { delete process.env.V6_HOLDOUT_UNLOCK; }
+});
+
+await test('the forward view reads only its own folder and is left by configureBarStore', () => {
+  const dir = path.join(tmp, 'store-fwd');
+  writeSeries(dir, 'dev', 'DEVONLYUSDT', day(2023, 1, 1), day(2024, 12, 31));
+  writeSeries(dir, 'holdout', 'HOLDONLYUSDT', day(2025, 1, 1), day(2026, 6, 1));
+  writeSeries(dir, 'forward', 'BTCUSDT', day(2025, 8, 1), day(2026, 12, 20), () => 9e9);
+  writeSeries(dir, 'forward', 'FWDUSDT', day(2025, 8, 1), day(2026, 12, 20), () => 1e8);
+  bars.openForwardView({ dir });
+  try {
+    assert.ok(bars.isForwardView());
+    assert.deepStrictEqual(bars.listSymbols(), ['BTCUSDT', 'FWDUSDT']);
+    assert.strictEqual(loadBars({ timeframe: '1d' }).get('BTCUSDT').at(-1).t, day(2026, 12, 20));
+    assert.deepStrictEqual(pointInTimeUniverse(day(2026, 12, 1)), ['BTCUSDT', 'FWDUSDT']);
+  } finally { configureBarStore({ dir: fixture }); }
+  assert.ok(!bars.isForwardView());
+  assert.throws(() => loadBars({ timeframe: '1d', to: HOLDOUT_START }), /holdout/);
+});
+
+await test('no research script opens the forward view', () => {
+  const dir = fileURLToPath(new URL('../scripts/v6/research/', import.meta.url));
+  for (const f of readdirSync(dir).filter((x) => x.endsWith('.mjs'))) {
+    assert.ok(!readFileSync(path.join(dir, f), 'utf8').includes('openForwardView'), f);
+  }
 });
 
 console.log('exclusions');

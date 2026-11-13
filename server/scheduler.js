@@ -34,6 +34,10 @@ const JOBS = [
   // order books and appends to data/research/arb/. Places no orders and never touches
   // Portfolio. Runs as a child process so a slow venue cannot stall the server.
   { name: 'arbLogger', script: 'scripts/v6/arb-logger.mjs', everyMinutes: 2, timeoutMs: 5 * 60_000 },
+  // LOCAL CHANGE (2026-11-13): forward test of four frozen near-miss strategies. Research only:
+  // appends closed Binance bars and would-be fills to data/research/v6-forward/. No orders, no
+  // Portfolio, no certificates. Results stay locked until 2027-05-14 (docs/rebuild/forward-test.md).
+  { name: 'forwardTest', script: 'scripts/v6/forward-test.mjs', everyMinutes: 60, timeoutMs: 15 * 60_000 },
 ];
 
 // ---------------------------------------------------------------------------

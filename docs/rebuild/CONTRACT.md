@@ -54,6 +54,12 @@ The biggest risk here is many agents trying many ideas until one looks good by l
   holdout evaluation, and is never retuned after.
   Caveat to carry into all reports: earlier research already looked at this period, so
   the two legacy Strategy Lab rules are NOT clean on it. New rules are.
+- **Amendment 2026-11-13 (user-approved): holdout end and forward window.** The HOLDOUT now
+  ends `2026-11-13` (`HOLDOUT_END`); an unlocked `loadBars()` never returns a later bar. From
+  `2026-11-14` (`FORWARD_START`) bars go to a separate forward store read only by
+  `scripts/v6/forward-test.mjs` through `openForwardView()`, never by research scripts. A
+  forward result does not certify anything. Details and the four frozen candidates:
+  `docs/rebuild/forward-test.md`.
 - **Log every trial.** Each parameter set you evaluate gets a line in
   `data/research/v6/trials-<agent>.jsonl` — including the failures. Deflated Sharpe uses
   the total trial count across all agents, so hiding trials corrupts the result.
