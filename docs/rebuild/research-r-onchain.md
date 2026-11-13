@@ -1,4 +1,4 @@
-STATUS: PRE-REGISTERED 2026-11-13, before any on-chain or sentiment data was fetched. Results go below, unchanged above.
+STATUS: DONE 2026-11-13. VERDICT: NO EDGE, NOTHING FROZEN. Pre-registered (commit 5e9c54d) before any data was fetched; text above Results unchanged.
 
 # r-onchain: do sentiment and on-chain flows time BTC and ETH?
 
@@ -55,6 +55,31 @@ A passing cell goes on to a full walk-forward under D1-D8, including D8 (beat bu
 gate certifies nothing. If none passes, nothing is frozen and the family is closed. No new cells, thresholds
 or lookbacks after results are seen.
 
-## Results
+## Results (run 2026-11-13, `node scripts/v6/research/r-onchain.mjs study`)
 
-(Not run yet.)
+Data fetched 2026-11-13 into `.rebuild/data/research/onchain/` (not in git): Fear & Greed 2,522 DEV days,
+stablecoins 2,590, BTC flows 2,771. Every Coin Metrics value carries a status time in April 2026, which
+confirms H3's flows were computed long after the fact. Drift per day: BTC 0.149%, ETH 0.158%.
+
+| Cell | Events | Gross | Cost | Excess | t (4-wk blocks) | Halves | Gate |
+|---|---|---|---|---|---|---|---|
+| H1 BTC h=10 | 57 | 2.232% | 0.260% | 0.738% | 0.90 | 1.199% / 0.005% | FAIL |
+| H1 BTC h=30 | 29 | 2.556% | 0.260% | -1.924% | -0.60 | -0.842% / -3.456% | FAIL (also n<30) |
+| H1 ETH h=10 | 57 | 1.399% | 0.260% | -0.181% | 0.07 | -0.313% / 0.029% | FAIL |
+| H1 ETH h=30 | 29 | 1.348% | 0.260% | -3.392% | -0.61 | -4.435% / -1.914% | FAIL (also n<30) |
+| H2 basket | 1,738 days, 24 entries | 0.236% | 0.004% | 0.082% | 0.43 | 0.135% / 0.010% | FAIL |
+| H3 BTC | 1,155 days, 175 entries | 0.277% | 0.039% | 0.127% | **1.45** | 0.351% / -0.058% | FAIL |
+
+**No cell passes. Nothing is frozen; the family is closed.** Global trials: 518 -> 524.
+
+Reading:
+- **H1, buy fear:** trades after extreme fear made money on average, but no more than simply holding over
+  the same number of days. The 30-day holds did worse than holding: fear often came early in long bear
+  markets (2018, 2022).
+- **H2, stablecoin growth:** in the market 70% of days, with excess per day near zero. Not distinguishable
+  from buy-and-hold with less exposure.
+- **H3, exchange outflow:** the strongest (t 1.45), but it is all in the first half and negative after
+  2021-08. It could not have been certified anyway, because the flows are relabelled after the fact.
+
+Not done, and not to be done on this data: other fear thresholds, greed-selling, MVRV or active-address
+rules, other lookbacks, or combinations. Each would be a new trial chosen after seeing these numbers.
