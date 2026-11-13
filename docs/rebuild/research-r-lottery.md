@@ -1,4 +1,4 @@
-STATUS: PRE-REGISTERED 2026-11-13, before any lottery statistic was computed. Results go below, unchanged above.
+STATUS: DONE 2026-11-13. VERDICT: NO EDGE, NOTHING FROZEN. Pre-registered (commit 3d093cc) before the run; text above Results unchanged.
 
 # r-lottery: does a lottery-like coin underperform?
 
@@ -48,6 +48,32 @@ Only a passing cell goes on to a full walk-forward under D1-D8. LS cells would a
 branch. Nothing passes on the gate alone. If nothing passes, nothing is frozen and the family is closed.
 No new cells after results are seen.
 
-## Results
+## Results (run 2026-11-13, `node scripts/v6/research/r-lottery.mjs study`)
 
-(Not run yet.)
+198 coins were ever in the top 30; 179 have a same-symbol perp. 246 weekly events per cell. Per-week means:
+
+| Cell | L | Gross | Cost | Excess | t (4-wk blocks) | Halves | Gate |
+|---|---|---|---|---|---|---|---|
+| MAX-LO | 30 | 1.448% | 0.130% | 0.124% | 0.30 | 0.047% / 0.229% | FAIL |
+| MAX-LS | 30 | 0.205% | 0.261% | 0.205% | 0.23 | -0.151% / 0.692% | FAIL |
+| MAX-LO | 90 | 1.802% | 0.073% | 0.474% | **1.64** | 0.506% / 0.431% | FAIL (t) |
+| MAX-LS | 90 | 0.851% | 0.167% | 0.851% | 1.16 | 0.774% / 0.955% | FAIL (t) |
+| SKEW-LO | 30 | 1.310% | 0.232% | -0.014% | -0.14 | -0.149% / 0.170% | FAIL |
+| SKEW-LS | 30 | -0.152% | 0.390% | -0.152% | -0.30 | -0.401% / 0.188% | FAIL |
+| SKEW-LO | 90 | 1.758% | 0.130% | 0.430% | 1.56 | 0.332% / 0.564% | FAIL (t) |
+| SKEW-LS | 90 | 0.759% | 0.221% | 0.759% | 1.25 | 0.587% / 0.993% | FAIL (t) |
+
+**No cell passes. Nothing is frozen; the family is closed.** Global trials: 510 -> 518.
+
+Reading:
+- The 30-day signals show nothing. The 90-day signals point the predicted way in both halves, but the best t
+  is 1.64. That is short of the 2.0 bar for one test, and well short once it is one of 8 cells, and of 518 overall.
+- The LO cells' large gross (1.3-1.8% a week) is almost all market drift over 2020-2024: their excess over
+  the equal-weight universe is 0.0-0.5%. Long-only, this is a market bet, not a lottery effect.
+- The LS legs are noisy: the weekly excess swings by several percent, so even a 0.85% mean is not distinguishable
+  from zero over 4.7 years.
+- LS ranks only the coins with a perp at both opens, so its groups can differ from LO's. Stated here because
+  the pre-registration said "eligible coins" without saying so.
+
+Not done, and not to be done on this data: the reverse direction, other lookbacks, a top-50 universe, or
+stacking MAX and SKEW. Each would be a new trial chosen after seeing these numbers.
