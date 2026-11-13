@@ -44,7 +44,7 @@ the research scripts unchanged. The runner refuses to run if any of them changes
 F1 and F2 are close relatives: the same entry, with and without the regime filter. Read them as one idea
 tested two ways, not as two independent chances.
 
-Frozen script hashes (SHA-256 of the file bytes):
+Frozen script hashes (SHA-256 of the file text, line endings normalised to LF):
 
 ```
 r-risk.mjs      5a1dca6553278d3f7eda014f3783ff5832c72d873bc53a6e5764f213583738fa

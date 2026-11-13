@@ -41,7 +41,8 @@ const researchFile = (name) => join(ROOT, 'scripts', 'v6', 'research', name);
 
 export function checkFrozen(hashes = FROZEN_HASHES) {
   const changed = Object.entries(hashes)
-    .filter(([name, want]) => createHash('sha256').update(readFileSync(researchFile(name))).digest('hex') !== want)
+    // Line endings are normalised so a checkout with different git settings is not a "change".
+    .filter(([name, want]) => createHash('sha256').update(readFileSync(researchFile(name), 'utf8').replace(/\r\n/g, '\n')).digest('hex') !== want)
     .map(([name]) => name);
   if (changed.length) throw new Error(`Frozen strategy code changed: ${changed.join(', ')}. The forward test stops; see docs/rebuild/forward-test.md.`);
 }
