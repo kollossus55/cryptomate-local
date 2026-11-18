@@ -119,9 +119,14 @@ export default function StrategyLab() {
             {started && <> Running since {started}.</>} {lastMark && <> Last update {lastMark}.</>}
           </p>
         </div>
+      </div>
+
+      {/* Below the header, clear of the paper and legacy banners at the top of the screen. */}
+      <div className="flex flex-wrap items-center gap-3">
         <Button variant="outline" size="sm" onClick={() => runNow.mutate()} disabled={runNow.isPending} className="border-slate-700">
-          <RefreshCw className={`mr-2 h-4 w-4 ${runNow.isPending ? "animate-spin" : ""}`} /> Run now
+          <RefreshCw className={`mr-2 h-4 w-4 ${runNow.isPending ? "animate-spin" : ""}`} /> {runNow.isPending ? "Running…" : "Run now"}
         </Button>
+        <span className="text-xs text-slate-400">Runs every account once now, instead of waiting for the hourly run.</span>
       </div>
 
       {isLoading ? (
