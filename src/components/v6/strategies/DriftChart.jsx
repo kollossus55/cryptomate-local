@@ -23,7 +23,7 @@ const LEGEND = [
   { label: "Expected median", color: MEDIAN, dash: "3 3" },
   { label: "Expected range, 5th to 95th percentile", color: BAND },
 ];
-const LIMIT_LEGEND = { label: "Demotion limits", color: LIMIT, dash: LIMIT_DASH };
+const LIMIT_LEGEND = { label: "Demotion limit", color: LIMIT, dash: LIMIT_DASH };
 
 const tooltipRows = (row) => [
   row.returnPct != null && { label: "Forward", value: signedPct(row.returnPct), color: FORWARD },
@@ -60,7 +60,10 @@ export default function DriftChart({ drift }) {
   const lastIndexOf = (key) => rows.reduce((last, r, i) => (r[key] != null ? i : last), -1);
   const lastForward = lastIndexOf("returnPct");
   const lastMedian = lastIndexOf("p50");
-  const hasLimits = rows.some((r) => r.lo != null && r.hi != null);
+  const hasLimits = rows.some((r) => r.lo != null);
+  // A band built before the low-side-only change also has an upper limit.
+  const hasUpper = rows.some((r) => r.hi != null);
+  const limitKeys = hasUpper ? ["lo", "hi"] : ["lo"];
   const lastExpectedX = rows[lastMedian]?.x;
   const pastBand = lastMedian >= 0 && lastForward > lastMedian;
   const breaches = (drift.breaches ?? [])
@@ -71,7 +74,8 @@ export default function DriftChart({ drift }) {
     columns: [
       { key: "x", label: xName }, { key: "forward", label: "Forward" }, { key: "p5", label: "5th pct" },
       { key: "p50", label: "Median" }, { key: "p95", label: "95th pct" },
-      ...(hasLimits ? [{ key: "lo", label: "Lower limit" }, { key: "hi", label: "Upper limit" }] : []),
+      ...(hasLimits ? [{ key: "lo", label: "Lower limit" }] : []),
+      ...(hasUpper ? [{ key: "hi", label: "Upper limit" }] : []),
       { key: "note", label: "Note" },
     ],
     rows: rows.map((r) => ({
@@ -87,7 +91,7 @@ export default function DriftChart({ drift }) {
       {hasLimits && (
         <span className="block text-slate-400">
           Leaving the shaded range alone is not a breach. The monitor looks after every {days ? "day" : "trade"}, so
-          demotion uses wider limits.
+          demotion uses {hasUpper ? "wider limits" : "a lower limit, and only falling below it demotes"}.
         </span>
       )}
       {pastBand && (
@@ -133,7 +137,7 @@ export default function DriftChart({ drift }) {
               dataKey="band" stroke="none" fill={BAND} fillOpacity={0.25} connectNulls
               isAnimationActive={false} activeDot={false}
             />
-            {hasLimits && ["lo", "hi"].map((key) => (
+            {hasLimits && limitKeys.map((key) => (
               <Line
                 key={key} dataKey={key} stroke={LIMIT} strokeWidth={1} strokeDasharray={LIMIT_DASH} dot={false}
                 connectNulls isAnimationActive={false} activeDot={false}

@@ -175,9 +175,15 @@ export function strategyHash(strategy) {
  * resample. The backtest's mean is only an estimate, and with one stage the band treats
  * it as exact: measured on 150-trade samples, 18.9% of healthy strategies were demoted.
  *
- * p5 and p95 are for the chart. lo and hi are the breach limits, set wider: the monitor
- * looks after every trade, and a healthy strategy would soon cross a 5% line on one of
- * those looks. lo and hi are tuned so that about `alpha` of bootstrapped paths ever leave.
+ * p5 and p95 are for the chart. lo is the breach limit, set wider: the monitor looks
+ * after every trade, and a healthy strategy would soon cross a 5% line on one of those
+ * looks. lo is tuned so that about `alpha` of bootstrapped paths ever fall below it.
+ *
+ * One-sided (sides: 'low'): only results below the range demote. A two-sided band spent
+ * half of alpha on results above the range, which is never a reason to stop a strategy.
+ * Measured on the test seeds, one-sided cut healthy demotions from 11.5% to 4.4% and
+ * raised lost-edge detection from 73.4% to 78.4%. Points carry hi: null. A band without
+ * `sides` (built before this change) is still read as two-sided.
  *
  * @param {number[]} returnsPct net percent per trade, as tradeOutcomes gives
  */
@@ -212,7 +218,7 @@ export function buildExpectedBand(returnsPct, { maxX = 100, nBoot = 2000, blockL
     for (let b = 0; b < nBoot; b++) {
       for (let x = minTrades - 1; x < maxX; x++) {
         const v = paths[b * maxX + x];
-        if (v < at(sorted[x], q / 2) || v > at(sorted[x], 1 - q / 2)) { left++; break; }
+        if (v < at(sorted[x], q)) { left++; break; }
       }
     }
     return left / nBoot;
@@ -220,16 +226,18 @@ export function buildExpectedBand(returnsPct, { maxX = 100, nBoot = 2000, blockL
   const levels = [0.1, 0.05, 0.02, 0.01, 0.005, 0.002, 0.001];
   const q = levels.find((level) => leaveRate(level) <= alpha) ?? levels[levels.length - 1];
   return {
-    x_unit: 'trades', n_trades: n, n_boot: nBoot, block_len: blockLen, seed, alpha, quantile: q, min_trades: minTrades, max_x: maxX,
+    x_unit: 'trades', sides: 'low', n_trades: n, n_boot: nBoot, block_len: blockLen, seed, alpha, quantile: q, min_trades: minTrades, max_x: maxX,
     points: sorted.map((col, x) => ({
       x: x + 1, p5: round(at(col, 0.05)), p50: round(at(col, 0.5)), p95: round(at(col, 0.95)),
-      lo: round(at(col, q / 2)), hi: round(at(col, 1 - q / 2)),
+      lo: round(at(col, q)), hi: null,
     })),
   };
 }
 
+const lowOnly = (e) => e.sides === 'low';
 const bandUsable = (e) => isObj(e) && Array.isArray(e.points) && e.points.length > 0 && e.points.length === e.max_x
-  && e.min_trades >= 1 && e.points.every((p) => Number.isFinite(p.lo) && Number.isFinite(p.hi));
+  && e.min_trades >= 1 && (e.sides === undefined || lowOnly(e))
+  && e.points.every((p) => Number.isFinite(p.lo) && (lowOnly(e) ? p.hi === null : Number.isFinite(p.hi)));
 
 /**
  * Compares a run of trade returns with the band. Past the band's end, the latest max_x
@@ -247,10 +255,11 @@ export function evaluateDrift(expected, returnsPct) {
   const window = returnsPct.slice(-expected.max_x);
   const cumulative = round(window.reduce((a, x) => a + x, 0));
   const { lo, hi } = expected.points[window.length - 1];
-  const inside = cumulative >= lo && cumulative <= hi;
+  const inside = cumulative >= lo && (lowOnly(expected) || cumulative <= hi);
+  const range = lowOnly(expected) ? `at least ${lo}%` : `${lo}% to ${hi}%`;
   return {
     n, cumulative, lo, hi, status: inside ? 'inside' : 'breach', ok: inside,
-    note: `Cumulative ${cumulative}% over ${window.length} trades, expected ${lo}% to ${hi}%`,
+    note: `Cumulative ${cumulative}% over ${window.length} trades, expected ${range}`,
   };
 }
 
@@ -543,7 +552,7 @@ export function checkDrift({ state, certificate }) {
   if (state.lifecycle === 'shadow') return check('drift', false, state.demotion_reason || 'Strategy is in shadow');
   if (state.drift_status === 'unknown' || state.drift_status === 'breach') return check('drift', false, state.drift_note || `Drift status is ${state.drift_status}`);
   const d = evaluateDrift(certificate?.expected, state.forward_series.map((p) => p.trade_return_pct));
-  return check('drift', d.ok, d.note, [val('forward trades', d.n), val('cumulative %', d.cumulative, d.lo === null ? null : `${d.lo} to ${d.hi}`), val('status', d.status)]);
+  return check('drift', d.ok, d.note, [val('forward trades', d.n), val('cumulative %', d.cumulative, d.lo === null ? null : d.hi === null ? `at least ${d.lo}` : `${d.lo} to ${d.hi}`), val('status', d.status)]);
 }
 
 /** Check 3. consensus.ok is required on its own: consensus.price is set even when it is false. */

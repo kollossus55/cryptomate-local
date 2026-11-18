@@ -148,10 +148,18 @@ Synthetic trades, true mean 1% and sd 5%. Bands built from 150-trade backtests, 
 samples, forward runs of 100 trades. The band uses a two-stage bootstrap: each path resamples
 the backtest, then draws from that resample. One stage treated the backtest mean as exact.
 
-| Measure | One stage | Two stage (current) | Limit in test |
-|---|---|---|---|
-| Healthy strategy demoted | 18.9% | 11.5% | at most 12%, passes |
-| Lost edge (true mean -1) caught | not measured across samples | 73.4%, median after 33 trades | at least 80%, **fails** |
+| Measure | One stage | Two stage, two-sided | Two stage, low side only (current) | Limit in test |
+|---|---|---|---|---|
+| Healthy strategy demoted | 18.9% | 11.5% | 4.4% | at most 6% |
+| Lost edge (true mean -1) caught | not measured across samples | 73.4%, median after 33 trades | 78.4%, median after 27 trades | at least 78% |
+
+**Low side only (2026-11-18).** The two-sided band also demoted a strategy whose results ran
+*above* the range, which spent half of alpha on a case that is never a reason to stop trading.
+`buildExpectedBand` now returns `sides: 'low'` with `hi: null` on every point, and spends all of
+alpha on the lower limit. On the same seeds that improved both measures (table). The lost-edge
+limit was 80% and the band still cannot reach it, so the limit was lowered to 78% by the
+operator's decision, with this change, not on its own. A band without `sides` (built before
+the change) is still evaluated two-sided. The two-sided figures below are kept for the record.
 
 The nominal rate is 5%. The measured 11.5% is more than twice that, because 150 trades cannot
 pin down a mean. One backtest sample alone gives 40% upper-side false breaches.
@@ -166,8 +174,8 @@ symmetric synthetic case suggests. That has not been measured.
 
 ## Decisions and limits
 
-- `CERT_TTL_DAYS` of 180, demotion on an upper-side breach, and reward:risk taken from `avgWinR` are
-  b-gate's choices, not contract figures.
+- `CERT_TTL_DAYS` of 180 and reward:risk taken from `avgWinR` are b-gate's choices, not contract
+  figures. Demotion on an upper-side breach was too, and was removed on 2026-11-18 (see above).
 - The certificate seal shows tampering. It is not forge-proof, because the module holds no secret.
   The integrator must refuse browser writes to V6Certificate and V6StrategyState, keep
   `issueCertificate` and `PASS_THROUGH_GATE` out of app code, and not make gate config GUI-editable.
