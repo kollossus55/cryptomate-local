@@ -25,6 +25,10 @@ const NAV_GROUPS = [
     { name: "Risk Controls", path: "RiskControls", icon: ShieldAlert },
     { name: "Exchanges", path: "Exchanges", icon: Network },
   ]},
+  // Not V6 and not legacy: the Strategy Lab's paper accounts, including the market exposure account.
+  { label: "Lab", items: [
+    { name: "Strategy Lab", path: "StrategyLab", icon: FlaskConical },
+  ]},
   { label: "Records", items: [
     { name: "Trade History", path: "TradeHistory", icon: History },
     { name: "Alerts", path: "Alerts", icon: Bell },
@@ -41,7 +45,6 @@ const NAV_GROUPS = [
     { name: "AI Insights", path: "Insights", icon: Activity },
     { name: "Backtesting", path: "Backtesting", icon: Activity },
     { name: "Committee", path: "Committee", icon: Users },
-    { name: "Strategy Lab", path: "StrategyLab", icon: FlaskConical },
     { name: "API Keys (live only)", path: "ExchangeSettings", icon: KeyRound },
     { name: "AI Settings", path: "AISettings", icon: Cpu },
   ]},
