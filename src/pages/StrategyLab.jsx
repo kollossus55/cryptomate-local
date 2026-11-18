@@ -1,4 +1,4 @@
-// LOCAL CHANGE (strategy lab): side-by-side view of the two daily paper
+// LOCAL CHANGE (strategy lab): side-by-side view of the daily paper
 // strategies run by the strategyLabWorker function. Each has its own virtual
 // $10,000 account, separate from the main paper portfolio and its risk
 // settings. Read-only apart from "Run now", which triggers one worker tick.
@@ -12,15 +12,19 @@ import { FlaskConical, RefreshCw, Info } from "lucide-react";
 import { format } from "date-fns";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from "recharts";
 
-// Categorical slots 1-3 (blue, orange, aqua), dark steps — validated on #0f172a.
+// Categorical slots 1-4 (blue, orange, aqua, violet), dark steps — validated on #0f172a.
 const SERIES = [
   { key: "trend_btc_eth", label: "Trend (BTC & ETH)", color: "#3987e5", dash: undefined },
   { key: "composite_daily", label: "SP500 AI composite", color: "#d95926", dash: undefined },
+  { key: "exposure_screened", label: "Market exposure (screened)", color: "#9b6bdf", dash: undefined },
   { key: "btc_hold", label: "BTC buy & hold", color: "#199e70", dash: "6 4" },
 ];
+const STRATS = SERIES.filter((s) => s.key !== "btc_hold");
+const BENCH = SERIES.find((s) => s.key === "btc_hold");
 const RULES = {
   trend_btc_eth: "Holds BTC and ETH (half each) while the daily close is above its 100-day average; cash otherwise. One decision per day, no stop.",
   composite_daily: "20 large coins on daily candles. Buys when all 6 SP500 AI sub-indicators are bullish, sells when fewer than 3 are. Stop at 2× ATR (3% floor), 1% risk per trade, max 10% per position, max 5 positions, no fixed take-profit.",
+  exposure_screened: "No edge claimed: market exposure, sized down. Holds up to 15 large, liquid coins that pass a screen (4+ venues, $100M+ daily volume, 3+ years on Binance, $10k OKX order under 0.10% cost), re-screened every 91 days. Weights 1/volatility, scaled to a 20% yearly vol target, never leveraged. Rebalanced weekly; stops for good at $7,000. Rules: docs/rebuild/exposure-account.md.",
 };
 const START = 10000;
 const money = (v) => (v == null ? "—" : `$${v.toLocaleString(undefined, { maximumFractionDigits: 0 })}`);
@@ -110,7 +114,7 @@ export default function StrategyLab() {
         <div>
           <h1 className="flex items-center gap-2 text-2xl font-bold text-slate-100"><FlaskConical className="h-6 w-6" /> Strategy Lab</h1>
           <p className="mt-1 max-w-3xl text-sm text-slate-400">
-            Two daily strategies paper-trading side by side, each with its own virtual $10,000. Separate from your main
+            Daily strategies paper-trading side by side, each with its own virtual $10,000. Separate from your main
             portfolio and its risk settings, and never places real orders.
             {started && <> Running since {started}.</>} {lastMark && <> Last update {lastMark}.</>}
           </p>
@@ -128,13 +132,13 @@ export default function StrategyLab() {
         </CardContent></Card>
       ) : (
         <>
-          <div className="grid gap-4 md:grid-cols-3">
-            {SERIES.slice(0, 2).map((s) => {
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+            {STRATS.map((s) => {
               const a = byId[s.key];
               return <StatCard key={s.key} label={s.label} color={s.color} dash={s.dash} equity={a?.last_equity} maxDD={a?.max_drawdown_percent}
                 extra={a ? `${Object.keys(a.positions || {}).length} open · ${a.trade_count} positions opened · fees ${money(a.total_fees)}` : null} />;
             })}
-            <StatCard label="BTC buy & hold (benchmark)" color={SERIES[2].color} dash={SERIES[2].dash} equity={btcHoldNow}
+            <StatCard label="BTC buy & hold (benchmark)" color={BENCH.color} dash={BENCH.dash} equity={btcHoldNow}
               extra={btcStart ? `From $${btcStart.toLocaleString()} at the lab's start, no fees` : null} />
           </div>
 
@@ -167,23 +171,34 @@ export default function StrategyLab() {
           </Card>
 
           <div className="grid gap-4 lg:grid-cols-2">
-            {SERIES.slice(0, 2).map((s) => {
+            {STRATS.map((s) => {
               const a = byId[s.key];
               const positions = Object.values(a?.positions || {});
+              const isExposure = s.key === "exposure_screened";
+              const target = (sym) => a?.last_targets?.weights?.[sym];
+              const lastScreen = a?.screen_log?.at(-1);
               return (
                 <Card key={s.key} className="bg-slate-900/60 border-slate-800">
                   <CardHeader className="pb-2">
                     <CardTitle className="text-base text-slate-200">{s.label}: open positions</CardTitle>
                     <p className="flex gap-2 text-xs text-slate-400"><Info className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />{RULES[s.key]}</p>
+                    {isExposure && a && (
+                      <div className="flex flex-wrap gap-2 pt-1 text-xs text-slate-300">
+                        {a.floored_at && <Badge variant="destructive">Stopped at the floor {format(new Date(a.floored_at), "d MMM yyyy")}</Badge>}
+                        <span>Members: {a.members?.length ? a.members.map((m) => m.replace("USDT", "")).join(", ") : "none yet"}</span>
+                        {lastScreen && <span className="text-slate-400">· screened {format(new Date(lastScreen.at), "d MMM")} on {lastScreen.snapshots} volume snapshot{lastScreen.snapshots === 1 ? "" : "s"}</span>}
+                        {a.last_targets?.basket_vol != null && <span className="text-slate-400">· basket vol {(a.last_targets.basket_vol * 100).toFixed(0)}%, invested {(a.last_targets.scale * 100).toFixed(0)}%</span>}
+                      </div>
+                    )}
                   </CardHeader>
                   <CardContent>
-                    {!positions.length ? <p className="text-sm text-slate-400">In cash — no signal right now.</p> : (
+                    {!positions.length ? <p className="text-sm text-slate-400">{isExposure && !a?.members?.length ? (a?.floored_at ? "In cash — stopped for good." : "In cash — waiting for the first screen.") : "In cash — no signal right now."}</p> : (
                       <div className="overflow-x-auto">
                         <table className="w-full text-sm">
                           <thead><tr className="text-left text-xs text-slate-400">
                             <th className="py-1 pr-3 font-normal">Coin</th><th className="pr-3 font-normal text-right">Value</th>
                             <th className="pr-3 font-normal text-right">Entry</th><th className="pr-3 font-normal text-right">Now</th>
-                            <th className="pr-3 font-normal text-right">P&L</th>{s.key === "composite_daily" && <th className="font-normal text-right">Stop</th>}
+                            <th className="pr-3 font-normal text-right">P&L</th>{s.key === "composite_daily" && <th className="font-normal text-right">Stop</th>}{isExposure && <th className="font-normal text-right">Target</th>}
                           </tr></thead>
                           <tbody>
                             {positions.map((p) => {
@@ -197,6 +212,7 @@ export default function StrategyLab() {
                                   <td className="pr-3 text-right">{now.toPrecision(5)}</td>
                                   <td className={`pr-3 text-right ${pnlCls(pl)}`}>{pct(pl)}</td>
                                   {s.key === "composite_daily" && <td className="text-right text-slate-400">{p.stop_price ? p.stop_price.toPrecision(5) : "—"}</td>}
+                                  {isExposure && <td className="text-right text-slate-400">{target(p.symbol) != null ? `${(target(p.symbol) * 100).toFixed(1)}%` : "—"}</td>}
                                 </tr>
                               );
                             })}

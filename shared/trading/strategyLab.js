@@ -15,6 +15,10 @@
 //                    no fixed take-profit. Stop at 2x ATR (3% floor, skip if
 //                    over 12%), risk 1% per trade, max 10% per position,
 //                    max 5 positions — the backtester's sizing.
+//   exposure_screened Market exposure, no edge claimed: a screened basket of
+//                    large liquid coins, inverse-vol weights scaled to a 20%
+//                    annual vol target, weekly rebalance, permanent floor at
+//                    70% of the start. Rules: docs/rebuild/exposure-account.md.
 //
 // Pure: callers pass candles, prices and the clock in; nothing here fetches.
 import { compositeComponent } from './signalEngine.js';
@@ -57,6 +61,36 @@ export const LAB_STRATEGIES = [
   },
 ];
 
+// Fixed by docs/rebuild/exposure-account.md (pre-registered 2026-11-18). Change them
+// only by adding a row to that doc's Changes table first.
+export const EXPOSURE_RULES = Object.freeze({
+  minVenues: 4,               // C2
+  minVolumeUsd: 100e6,        // C3: median of the daily snapshots
+  volumeDays: 30,             // C3: snapshots kept
+  snapshotMinUsd: 10e6,       // coins below this are left out of a snapshot
+  historyDays: 1095,          // C4: Binance daily history
+  orderUsd: 10000,            // C5
+  maxCostPct: 0.10,           // C5
+  minCandles: 60,             // C6
+  maxMembers: 15,
+  screenEveryDays: 91,
+  rebalanceEveryDays: 7,
+  volDays: 60,
+  volTarget: 0.20,
+  band: 0.25,
+  minTradeUsd: 25,
+  floorFraction: 0.70,
+});
+
+LAB_STRATEGIES.push({
+  id: 'exposure_screened',
+  name: 'Market exposure: screened coins, 20% vol target',
+  kind: 'exposure',
+  // Members come from the account's own screen, not from this list.
+  universe: [],
+  rules: EXPOSURE_RULES,
+});
+
 export const LAB_UNIVERSE = [...new Set(LAB_STRATEGIES.flatMap((s) => s.universe))];
 
 // All six composite members vote, regardless of the user's AISignalConfig —
@@ -85,7 +119,170 @@ export function newLabAccount(strategy, { now, btcPrice = null }) {
     total_fees: 0,
     trade_count: 0,
     benchmark_btc_start: btcPrice,
+    ...(strategy.kind === 'exposure' ? {
+      members: [], volume_log: [], screen_log: [], last_screen_bar: null,
+      last_rebalance_bar: null, rebalance_pending: false, floored_at: null,
+    } : {}),
   };
+}
+
+// ---------- market exposure account ----------
+
+const median0 = (values) => {
+  const v = [...values].sort((a, b) => a - b);
+  if (!v.length) return 0;
+  const m = v.length >> 1;
+  return v.length % 2 ? v[m] : (v[m - 1] + v[m]) / 2;
+};
+
+/** One day's volumes from the market hub's universe rows: C1 is applied by the hub, C2 here. */
+export function volumeSnapshot(universeRows, rules = EXPOSURE_RULES) {
+  const vols = {};
+  for (const r of universeRows || []) {
+    if ((r.venues?.length ?? 0) < rules.minVenues || r.priceConflict) continue;
+    if (!(r.quoteVolume >= rules.snapshotMinUsd)) continue;
+    vols[r.base] = Math.round(r.quoteVolume);
+  }
+  return vols;
+}
+
+/** Keeps the latest `volumeDays` snapshots, one per daily bar. */
+export function recordVolumeSnapshot(account, bar, vols, rules = EXPOSURE_RULES) {
+  const log = (account.volume_log || []).filter((e) => e.bar !== bar);
+  account.volume_log = [...log, { bar, vols }].sort((a, b) => a.bar - b.bar).slice(-rules.volumeDays);
+  return account;
+}
+
+export function screenDue(account, bar, rules = EXPOSURE_RULES) {
+  return account.last_screen_bar == null || bar - account.last_screen_bar >= rules.screenEveryDays * DAY_MS;
+}
+
+/** C3: median across the kept snapshots, a missing day counting as zero. Highest first. */
+export function volumeCandidates(account, rules = EXPOSURE_RULES) {
+  const log = account.volume_log || [];
+  if (!log.length) return [];
+  const bases = new Set(log.flatMap((e) => Object.keys(e.vols)));
+  return [...bases]
+    .map((base) => ({ base, medianVolume: median0(log.map((e) => e.vols[base] ?? 0)) }))
+    .filter((c) => c.medianVolume >= rules.minVolumeUsd)
+    .sort((a, b) => b.medianVolume - a.medianVolume);
+}
+
+/**
+ * C4 to C6 on the C3 candidates, then the member cap. `checks` maps base to
+ * { firstBinanceBar, okxCostPct, okxCandles, okxPrice }; a missing value fails its rule.
+ */
+export function applyScreen(account, candidates, checks, { bar, now, rules = EXPOSURE_RULES }) {
+  const rows = candidates.map(({ base, medianVolume }) => {
+    const c = checks.get(base) || {};
+    const failed = [];
+    if (!(Number.isFinite(c.firstBinanceBar) && now - c.firstBinanceBar >= rules.historyDays * DAY_MS)) failed.push('C4');
+    if (!(Number.isFinite(c.okxCostPct) && c.okxCostPct <= rules.maxCostPct)) failed.push('C5');
+    if (!((c.okxCandles ?? 0) >= rules.minCandles && c.okxPrice > 0)) failed.push('C6');
+    return { base, medianVolume: Math.round(medianVolume), failed };
+  });
+  const passed = rows.filter((r) => !r.failed.length);
+  passed.slice(rules.maxMembers).forEach((r) => r.failed.push('cap'));
+  const members = passed.slice(0, rules.maxMembers).map((r) => `${r.base}USDT`);
+  account.members = members;
+  account.last_screen_bar = bar;
+  account.rebalance_pending = true;
+  account.screen_log = [...(account.screen_log || []), {
+    bar, at: new Date(now).toISOString(), snapshots: (account.volume_log || []).length, members, rows,
+  }].slice(-20);
+  return account;
+}
+
+/**
+ * Target weights: 1/vol per member, scaled so the basket's vol (with correlations,
+ * annualised over 365 days) is at most the target. Never more than 100% in total.
+ */
+export function exposureTargets(members, candles, rules = EXPOSURE_RULES) {
+  const need = rules.volDays + 1;
+  const none = (usable) => ({ weights: new Map(), basketVol: null, scale: 0, usable });
+  const usable = members.filter((s) => (candles.get(s)?.length ?? 0) >= need);
+  if (!usable.length) return none(usable);
+  // The same dates for every member, so the correlations line up.
+  const common = usable.map((s) => new Set(candles.get(s).map((c) => c.openTime)))
+    .reduce((a, b) => new Set([...a].filter((t) => b.has(t))));
+  const times = [...common].sort((a, b) => a - b).slice(-need);
+  if (times.length < need) return none(usable);
+  const returns = usable.map((s) => {
+    const byTime = new Map(candles.get(s).map((c) => [c.openTime, c.close]));
+    const closes = times.map((t) => byTime.get(t));
+    return closes.slice(1).map((c, i) => Math.log(c / closes[i]));
+  });
+  const n = rules.volDays;
+  const means = returns.map((r) => r.reduce((a, x) => a + x, 0) / n);
+  const cov = (i, j) => returns[i].reduce((a, x, k) => a + (x - means[i]) * (returns[j][k] - means[j]), 0) / (n - 1);
+  const vols = usable.map((_, i) => Math.sqrt(cov(i, i)));
+  if (vols.some((v) => !(v > 0))) return none(usable);
+  const inv = vols.map((v) => 1 / v);
+  const sum = inv.reduce((a, x) => a + x, 0);
+  const base = inv.map((x) => x / sum);
+  let variance = 0;
+  for (let i = 0; i < usable.length; i++) for (let j = 0; j < usable.length; j++) variance += base[i] * base[j] * cov(i, j);
+  // Rounding can leave a fully hedged basket's variance a hair below zero.
+  const basketVol = Math.sqrt(Math.max(0, variance) * 365);
+  const scale = basketVol > 0 ? Math.min(1, rules.volTarget / basketVol) : 1;
+  return { weights: new Map(usable.map((s, i) => [s, base[i] * scale])), basketVol, scale, usable };
+}
+
+/** Every run: at or below the floor, sell everything and stop for good. */
+function checkFloor(account, strategy, market, now) {
+  if (strategy.kind !== 'exposure') return [];
+  const floor = account.starting_capital * strategy.rules.floorFraction;
+  if (!account.floored_at && accountEquity(account, market.prices) > floor) return [];
+  if (!account.floored_at) account.floored_at = new Date(now).toISOString();
+  const trades = [];
+  for (const pos of Object.values({ ...account.positions })) {
+    const price = market.prices.get(pos.symbol);
+    if (!price) continue; // sold on a later run, once a price returns
+    trades.push(fill(account, { symbol: pos.symbol, side: 'sell', quoteAmount: pos.quantity * price, price,
+      quoteVolume24h: market.candles.get(pos.symbol)?.at(-1)?.quoteVolume, reason: `Floor: equity at or below $${floor.toFixed(0)}, stopped for good`, now }));
+  }
+  return trades;
+}
+
+function decideExposure(account, strategy, market, now, bar) {
+  const rules = strategy.rules;
+  if (account.floored_at) return [];
+  const due = account.rebalance_pending || account.last_rebalance_bar == null
+    || bar - account.last_rebalance_bar >= rules.rebalanceEveryDays * DAY_MS;
+  if (!due) return [];
+  const members = account.members || [];
+  const { weights, basketVol, scale } = exposureTargets(members, market.candles, rules);
+  const equity = accountEquity(account, market.prices);
+  const symbols = [...new Set([...members, ...Object.keys(account.positions)])];
+  const plan = [];
+  for (const s of symbols) {
+    const price = market.prices.get(s);
+    if (!price) continue;
+    const isMember = members.includes(s);
+    // A member without usable candles keeps what it holds rather than being sold on missing data.
+    if (account.positions[s] && isMember && !weights.has(s)) continue;
+    const cur = (account.positions[s]?.quantity ?? 0) * price;
+    const tgt = (weights.get(s) ?? 0) * equity;
+    const diff = tgt - cur;
+    if (Math.abs(diff) < rules.minTradeUsd) continue;
+    if ((cur > 0) === (tgt > 0) && Math.abs(diff) <= rules.band * tgt) continue;
+    const why = !isMember ? 'left the universe'
+      : `target ${((weights.get(s) ?? 0) * 100).toFixed(1)}% (basket vol ${(basketVol * 100).toFixed(0)}%, scale ${scale.toFixed(2)})`;
+    plan.push({ s, price, diff, why, vol: market.candles.get(s)?.at(-1)?.quoteVolume });
+  }
+  const trades = [];
+  for (const p of plan.sort((a, b) => a.diff - b.diff)) { // sells first
+    if (p.diff < 0) {
+      trades.push(fill(account, { symbol: p.s, side: 'sell', quoteAmount: -p.diff, price: p.price, quoteVolume24h: p.vol, reason: `Rebalance: ${p.why}`, now }));
+    } else {
+      const amt = Math.min(p.diff, account.cash / 1.003);
+      if (amt >= rules.minTradeUsd) trades.push(fill(account, { symbol: p.s, side: 'buy', quoteAmount: amt, price: p.price, quoteVolume24h: p.vol, reason: `Rebalance: ${p.why}`, now }));
+    }
+  }
+  account.last_rebalance_bar = bar;
+  account.rebalance_pending = false;
+  account.last_targets = { bar, basket_vol: basketVol, scale, weights: Object.fromEntries(weights) };
+  return trades;
 }
 
 export function compositeVotes(closedCandles, bars = 200) {
@@ -227,11 +424,12 @@ function decideComposite(account, strategy, market, now) {
  * Mutates and returns the account.
  */
 export function runLabStep({ account, strategy, market, now }) {
-  const trades = checkStops(account, strategy, market, now);
+  const trades = [...checkStops(account, strategy, market, now), ...checkFloor(account, strategy, market, now)];
   const bar = market.candles.get('BTCUSDT')?.at(-1)?.openTime ?? null;
   let decided = false;
   if (bar && bar !== account.last_decision_bar) {
-    trades.push(...(strategy.kind === 'trend' ? decideTrend : decideComposite)(account, strategy, market, now));
+    const decide = { trend: decideTrend, composite: decideComposite, exposure: decideExposure }[strategy.kind];
+    trades.push(...decide(account, strategy, market, now, bar));
     account.last_decision_bar = bar;
     decided = true;
   }
