@@ -181,7 +181,7 @@ export default function ExchangeSettings() {
           </Link>
           
           <h1 className="text-4xl font-bold mb-2 bg-gradient-to-r from-indigo-400 to-purple-400 bg-clip-text text-transparent">
-            Exchange Settings
+            API Keys (live only)
           </h1>
           <p className="text-slate-400">Connect exchanges and manage API credentials</p>
         </div>
@@ -212,10 +212,10 @@ export default function ExchangeSettings() {
                     <Info className="w-6 h-6 text-white" />
                   </div>
                   <div>
-                    <h3 className="font-bold text-white mb-2 text-lg">Simulated Trading Mode</h3>
+                    <h3 className="font-bold text-white mb-2 text-lg">Live trading only. Not used by V6.</h3>
                     <p className="text-white leading-relaxed">
-                      API credentials are stored for demonstration. <strong className="text-yellow-300">All trading remains simulated</strong> using real market prices. 
-                      Live order execution requires backend functions (not yet enabled). This interface prepares your setup for when you're ready to go live.
+                      Keys stored here are for the old engine's live order path, which can place real orders once armed.
+                      V6 uses public data and never reads these keys. For market data, see Exchanges.
                     </p>
                   </div>
                 </div>
@@ -260,8 +260,8 @@ export default function ExchangeSettings() {
                       </Badge>
                     </div>
                     <p className="text-slate-300 text-sm leading-relaxed">
-                      Real-time prices and market data are streamed from OKX's public API. No API key required —
-                      this feed powers all charts, signals, and paper trading across the app.
+                      Real-time prices and market data are streamed from OKX's public API. No API key required.
+                      Feeds the legacy pages. V6 venues are managed on the Exchanges page.
                     </p>
                   </div>
                 </div>

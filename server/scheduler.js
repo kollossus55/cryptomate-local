@@ -9,13 +9,35 @@
  * double-spend the same cash.
  */
 
+import { spawn } from 'node:child_process';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+
 const JOBS = [
-  // Matches "Auto Trading Scheduler" — */5 * * * *
-  { name: 'tradingScheduler', fn: 'tradingScheduler', everyMinutes: 5 },
+  // V6 paper engine. Replaced the legacy tradingScheduler job at cutover: the two
+  // must never run against Portfolio together (CONTRACT section 6).
+  { name: 'v6Engine', fn: 'v6Engine', everyMinutes: 5 },
   // Matches "Altcoin Scan Scheduler" — */15 * * * *
   { name: 'altcoinScan', fn: 'altcoinScannerWorker', everyMinutes: 15 },
   // Matches "Notification Cleanup" — daily
   { name: 'notificationCleanup', fn: 'notificationCleanup', everyMinutes: 1440 },
+  // LOCAL CHANGE (agent committee, phase 2): label shadow decisions with their
+  // 24h forward outcome. Local-only job; no Base44 equivalent.
+  { name: 'committeeOutcomes', fn: 'resolveCommitteeOutcomes', everyMinutes: 60 },
+  // LOCAL CHANGE (strategy lab): two daily paper strategies in their own
+  // virtual accounts. Hourly: marks equity and checks stops; daily decisions
+  // run once per closed OKX daily candle (16:00 UTC). Local-only job.
+  { name: 'strategyLab', fn: 'strategyLabWorker', everyMinutes: 60 },
+  // LOCAL CHANGE (2026-11-08): cross-exchange gap logger. Research only: reads public
+  // order books and appends to data/research/arb/. Places no orders and never touches
+  // Portfolio. Runs as a child process so a slow venue cannot stall the server.
+  { name: 'arbLogger', script: 'scripts/v6/arb-logger.mjs', everyMinutes: 2, timeoutMs: 5 * 60_000 },
+  // LOCAL CHANGE (2026-11-13): forward test of four frozen near-miss strategies. Research only:
+  // appends closed Binance bars and would-be fills to data/research/v6-forward/. No orders, no
+  // Portfolio, no certificates. Results stay locked until 2027-05-14 (docs/rebuild/forward-test.md).
+  { name: 'forwardTest', script: 'scripts/v6/forward-test.mjs', everyMinutes: 60, timeoutMs: 15 * 60_000 },
 ];
 
 // ---------------------------------------------------------------------------
@@ -40,6 +62,22 @@ const JOBS = [
 
 const HEARTBEAT_INTERVAL_MS = 5 * 60_000;
 
+/** Runs a script in its own node process; resolves on exit 0, rejects on failure or timeout. */
+function runScript(rel, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [rel], { cwd: ROOT, stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
+    let err = '';
+    child.stderr.on('data', (d) => { if (err.length < 2000) err += d; });
+    const timer = setTimeout(() => { child.kill(); reject(new Error(`timed out after ${timeoutMs} ms`)); }, timeoutMs);
+    child.on('error', (e) => { clearTimeout(timer); reject(e); });
+    child.on('exit', (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve({ ok: true });
+      else reject(new Error(`exit ${code}: ${err.trim().split('\n').pop() ?? ''}`));
+    });
+  });
+}
+
 export class Scheduler {
   constructor({ registry, store, log }) {
     this.registry = registry;
@@ -53,8 +91,9 @@ export class Scheduler {
 
   start() {
     this.startHeartbeat();
+    let scheduled = 0;
     for (const job of JOBS) {
-      if (!this.registry.has(job.fn)) {
+      if (job.fn && !this.registry.has(job.fn)) {
         this.log.warn(`Scheduler: "${job.fn}" is not loaded — skipping ${job.name}`);
         continue;
       }
@@ -66,8 +105,11 @@ export class Scheduler {
         }
         this.running.add(job.name);
         try {
-          const result = await this.registry.invoke(job.fn, {});
+          const result = job.script ? await runScript(job.script, job.timeoutMs) : await this.registry.invoke(job.fn, {});
           this.lastRun[job.name] = { at: new Date().toISOString(), ok: true, result };
+          // Worker console output never reaches the log files, so a job that wants
+          // a durable line per cycle returns it.
+          if (typeof result?.logLine === 'string') this.log.info(`${job.name}: ${result.logLine}`);
         } catch (err) {
           this.lastRun[job.name] = { at: new Date().toISOString(), ok: false, error: err.message };
           this.log.error(`${job.name} failed: ${err.message}`);
@@ -77,7 +119,8 @@ export class Scheduler {
       };
 
       // Stagger the first run so three jobs do not all fire at boot.
-      const delay = this.timers.length * 20_000 + 10_000;
+      // Counted here because this.timers only fills after each first run.
+      const delay = scheduled++ * 20_000 + 10_000;
       setTimeout(() => { tick(); this.timers.push(setInterval(tick, job.everyMinutes * 60_000)); }, delay);
 
       this.log.info(`Scheduled ${job.name} every ${job.everyMinutes} min`);

@@ -9,17 +9,66 @@ import { ArrowLeft, TrendingUp, TrendingDown, Search, Filter, RefreshCw, CheckCi
 import { Link } from "react-router-dom";
 import { createPageUrl } from "../components/utils";
 import { format } from "date-fns";
+import { V6_EXCHANGE, V6_RESET_REFUSED, isV6Trade, v6RecordExists } from "@/lib/v6Trades";
+
+const ENGINES = [
+  { id: "v6", label: "V6" },
+  { id: "legacy", label: "Legacy" },
+  { id: "all", label: "All engines" },
+];
+
+const signedMoney = (value) => `${value > 0 ? '+' : value < 0 ? '-' : ''}$${Math.abs(value).toFixed(2)}`;
+
+// V6 fills carry their own fill time. created_date is when the row was stored.
+const tradeTime = (trade) => {
+  const date = new Date(trade.timestamp || trade.created_date);
+  return Number.isNaN(date.getTime()) ? 'Time not recorded' : format(date, 'MMM dd, yyyy • HH:mm:ss');
+};
+
+function V6TradeDetail({ trade }) {
+  const facts = [
+    ['Strategy', trade.strategy_id],
+    ['Reason code', trade.reason_code],
+    ['Fee', Number.isFinite(trade.fee) ? `$${trade.fee.toFixed(2)}` : null],
+    ['Slippage', Number.isFinite(trade.slippage_percent) ? `${trade.slippage_percent.toFixed(3)}%` : null],
+    ['Fill method', trade.fill_method],
+    ['P&L before costs', Number.isFinite(trade.gross_profit_loss) ? signedMoney(trade.gross_profit_loss) : null],
+  ].filter(([, value]) => value !== null && value !== undefined && value !== '');
+
+  return (
+    <div className="border-t border-slate-700 pt-4">
+      <h4 className="text-slate-200 font-semibold mb-2">Why this trade</h4>
+      <p className="text-sm text-slate-300 mb-3">
+        {trade.exit_reason || trade.ai_signal?.reasoning || 'No reason was recorded.'}
+      </p>
+      <dl className="grid grid-cols-2 md:grid-cols-3 gap-3">
+        {facts.map(([label, value]) => (
+          <div key={label}>
+            <dt className="text-slate-400 text-xs">{label}</dt>
+            <dd className="text-sm text-white break-words">{value}</dd>
+          </div>
+        ))}
+      </dl>
+      <p className="text-xs text-slate-500 mt-3">Simulated paper fill. No order was sent to an exchange.</p>
+    </div>
+  );
+}
 
 export default function TradeHistory() {
   const [searchQuery, setSearchQuery] = useState("");
   const [filterType, setFilterType] = useState("all");
+  const [engine, setEngine] = useState("v6");
 
   const queryClient = useQueryClient();
 
-  const { data: trades, isLoading } = useQuery({
+  const { data: trades = [], isLoading, isError, error: tradesError } = useQuery({
     queryKey: ['trades'],
     queryFn: () => base44.entities.Trade.list('-created_date', 1000),
-    initialData: [],
+  });
+
+  const { data: v6Record } = useQuery({
+    queryKey: ['v6-record'],
+    queryFn: v6RecordExists,
   });
 
   const { data: portfolio } = useQuery({
@@ -32,15 +81,12 @@ export default function TradeHistory() {
 
   const resetPortfolioMutation = useMutation({
     mutationFn: async () => {
+      // Checked again here: the button may be stale, and this cannot be undone.
+      if (await v6RecordExists()) throw new Error(V6_RESET_REFUSED);
+
       if (portfolio?.id) {
-        // Fetch ALL trades (the default list() page size would leave some behind)
-        const allTrades = await base44.entities.Trade.list('-created_date', 1000);
-        // Bulk-delete every trade in one call so the history fully clears
-        if (allTrades.length > 0) {
-          await base44.entities.Trade.deleteMany({
-            id: { $in: allTrades.map(t => t.id) }
-          });
-        }
+        // Scoped on the server, so this holds for rows beyond any list() page too.
+        await base44.entities.Trade.deleteMany({ exchange: { $ne: V6_EXCHANGE } });
 
         // Then, update the portfolio to its initial state
         return await base44.entities.Portfolio.update(portfolio.id, {
@@ -55,6 +101,7 @@ export default function TradeHistory() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['portfolio'] });
       queryClient.invalidateQueries({ queryKey: ['trades'] });
+      queryClient.invalidateQueries({ queryKey: ['v6-record'] });
     },
     onError: (error) => {
       console.error('Reset failed:', error);
@@ -63,24 +110,29 @@ export default function TradeHistory() {
   });
 
   const handleResetPortfolio = async () => {
-    if (window.confirm('Are you sure you want to reset your paper trading portfolio? This will clear ALL trade history and reset your balance to $10,000.')) {
+    if (window.confirm('Reset the legacy paper portfolio? This clears the legacy trade history and sets the balance back to $10,000.')) {
       await resetPortfolioMutation.mutateAsync();
     }
   };
 
-  const filteredTrades = trades.filter(trade => {
-    const matchesSearch = trade.asset_symbol.toLowerCase().includes(searchQuery.toLowerCase());
+  // Totals follow the engine filter: mixing engines would blend two unrelated records.
+  const engineTrades = trades.filter(trade =>
+    engine === "all" || (engine === "v6") === isV6Trade(trade)
+  );
+
+  const filteredTrades = engineTrades.filter(trade => {
+    const matchesSearch = (trade.asset_symbol ?? '').toLowerCase().includes(searchQuery.toLowerCase());
     const matchesFilter = filterType === "all" || trade.trade_type === filterType;
     return matchesSearch && matchesFilter;
   });
 
-  const totalValue = trades.reduce((sum, trade) => sum + (trade.total_value || 0), 0);
-  const completedBuyTrades = trades.filter(t => t.status === 'completed' && t.trade_type === 'buy').length;
-  const completedSellTrades = trades.filter(t => t.status === 'completed' && t.trade_type === 'sell').length;
-  const totalProfit = trades.reduce((sum, trade) => sum + (trade.profit_loss || 0), 0);
+  const totalValue = engineTrades.reduce((sum, trade) => sum + (trade.total_value || 0), 0);
+  const completedBuyTrades = engineTrades.filter(t => t.status === 'completed' && t.trade_type === 'buy').length;
+  const completedSellTrades = engineTrades.filter(t => t.status === 'completed' && t.trade_type === 'sell').length;
+
   
   // Calculate separate stats for realized vs all trades
-  const sellTrades = trades.filter(t => t.trade_type === 'sell' && t.status === 'completed');
+  const sellTrades = engineTrades.filter(t => t.trade_type === 'sell' && t.status === 'completed');
   const realizedPnL = sellTrades.reduce((sum, trade) => sum + ((trade.profit_loss || 0)), 0);
   const hasSellTrades = sellTrades.length > 0;
 
@@ -90,10 +142,10 @@ export default function TradeHistory() {
         
         {/* Header */}
         <div className="mb-8">
-          <Link to={createPageUrl('Trading')}>
+          <Link to={createPageUrl('MissionControl')}>
             <Button variant="ghost" className="mb-4 text-slate-400 hover:text-white">
               <ArrowLeft className="w-4 h-4 mr-2" />
-              Back to Trading
+              Back to Mission Control
             </Button>
           </Link>
           
@@ -105,29 +157,31 @@ export default function TradeHistory() {
               <div className="flex flex-col gap-1">
                 <p className="text-slate-400">View and analyze your trading activity</p>
                 {portfolio?.positions?.length > 0 && (
-                  <p className="text-sm font-medium text-emerald-400">
-                    Current Open Positions: {portfolio.positions.length} (Waiting for targets)
+                  <p className="text-sm font-medium text-slate-300">
+                    Open positions: {portfolio.positions.length}
                   </p>
                 )}
               </div>
-              <div className="flex items-center gap-2 mt-2 text-xs text-indigo-300 bg-indigo-500/10 px-2 py-1 rounded-lg border border-indigo-500/20 w-fit">
-                <Sparkles className="w-3 h-3" />
-                <span>Auto-trading will automatically add sell trades here when profit targets are met</span>
-              </div>
             </div>
             <div className="flex items-center gap-3">
-              <Badge className="bg-yellow-500/20 text-yellow-400 border-yellow-500/30">
-                PAPER TRADING
-              </Badge>
-              <Button
-                onClick={handleResetPortfolio}
-                variant="outline"
-                className="border-red-500/50 text-red-400 hover:bg-red-500/10 hover:border-red-500"
-                disabled={resetPortfolioMutation.isPending}
-              >
-                <RefreshCw className="w-4 h-4 mr-2" />
-                {resetPortfolioMutation.isPending ? 'Resetting...' : 'Reset Portfolio & Clear History'}
-              </Button>
+              {engine === "v6" && (
+                <Badge className="bg-yellow-500/20 text-yellow-400 border-yellow-500/30">
+                  PAPER TRADING
+                </Badge>
+              )}
+              {v6Record === false ? (
+                <Button
+                  onClick={handleResetPortfolio}
+                  variant="outline"
+                  className="border-red-500/50 text-red-400 hover:bg-red-500/10 hover:border-red-500"
+                  disabled={resetPortfolioMutation.isPending}
+                >
+                  <RefreshCw className="w-4 h-4 mr-2" />
+                  {resetPortfolioMutation.isPending ? 'Resetting...' : 'Reset Legacy Portfolio & History'}
+                </Button>
+              ) : v6Record === true ? (
+                <p className="text-xs text-slate-400 max-w-xs">{V6_RESET_REFUSED}</p>
+              ) : null}
             </div>
           </div>
         </div>
@@ -206,6 +260,19 @@ export default function TradeHistory() {
             />
           </div>
           
+          <div className="flex gap-2" role="group" aria-label="Engine">
+            {ENGINES.map(({ id, label }) => (
+              <Button
+                key={id}
+                variant={engine === id ? "default" : "outline"}
+                onClick={() => setEngine(id)}
+                className={engine === id ? "bg-indigo-600" : "border-slate-700 text-slate-300"}
+              >
+                {label}
+              </Button>
+            ))}
+          </div>
+
           <div className="flex gap-2">
             <Button
               variant={filterType === "all" ? "default" : "outline"}
@@ -240,10 +307,20 @@ export default function TradeHistory() {
                 <span className="text-slate-400">Loading trades...</span>
               </div>
             </div>
+          ) : isError ? (
+            <Card className="bg-red-950/20 border-red-900/50">
+              <CardContent className="py-12 text-center">
+                <p className="text-red-300">Could not load trades: {tradesError?.message}</p>
+              </CardContent>
+            </Card>
           ) : filteredTrades.length === 0 ? (
             <Card className="bg-slate-800 border-slate-700">
               <CardContent className="py-12 text-center">
-                <p className="text-slate-400">No trades found</p>
+                <p className="text-slate-400">
+                  {engine === "v6" && !searchQuery && filterType === "all"
+                    ? 'No V6 trades yet. Being in cash is a valid result. Older trades are under Legacy.'
+                    : 'No trades found'}
+                </p>
               </CardContent>
             </Card>
           ) : (
@@ -252,6 +329,7 @@ export default function TradeHistory() {
               const price = trade.price || 0;
               const totalValue = trade.total_value || 0;
               const profitLoss = trade.profit_loss || 0;
+              const isV6 = isV6Trade(trade);
               
               // Get status styling
               const getStatusColor = (status) => {
@@ -314,14 +392,14 @@ export default function TradeHistory() {
                                   ? 'bg-green-500/20 text-green-400 border-green-500/50' 
                                   : 'bg-red-500/20 text-red-400 border-red-500/50'
                               }>
-                                {trade.trade_type.toUpperCase()}
+                                {(trade.trade_type ?? 'trade').toUpperCase()}
                               </Badge>
                               <Badge className={`${getStatusColor(trade.status)} border-2 font-bold`}>
-                                {getStatusIcon(trade.status)} {trade.status.toUpperCase()}
+                                {getStatusIcon(trade.status)} {(trade.status ?? 'unknown').toUpperCase()}
                               </Badge>
                             </div>
                             <p className="text-sm text-slate-400">
-                              {format(new Date(trade.created_date), 'MMM dd, yyyy • HH:mm:ss')}
+                              {tradeTime(trade)}
                             </p>
                           </div>
                         </div>
@@ -335,7 +413,7 @@ export default function TradeHistory() {
                               ? 'bg-red-500/20 text-red-400 border-red-500/50'
                               : 'bg-slate-500/20 text-slate-400 border-slate-500/50'
                           } border-2`}>
-                            {profitLoss > 0 ? '+' : ''}${Math.abs(profitLoss).toFixed(2)} P&L
+                            {signedMoney(profitLoss)} P&L
                           </Badge>
                         )}
                       </div>
@@ -366,12 +444,12 @@ export default function TradeHistory() {
                           <div className="flex items-start gap-2 mb-2">
                             <CheckCircle2 className="w-5 h-5 text-green-400 flex-shrink-0 mt-0.5" />
                             <div className="flex-1">
-                              <h4 className="text-green-400 font-semibold mb-1">Trade Executed Successfully</h4>
+                              <h4 className="text-green-400 font-semibold mb-1">{isV6 ? 'Paper fill recorded' : 'Trade filled'}</h4>
                               <p className="text-slate-300 text-sm">
-                                {trade.trade_type === 'buy' ? 'Bought' : 'Sold'} {quantity.toFixed(6)} {trade.asset_symbol.split('/')[0]} at ${price.toLocaleString()}
+                                {trade.trade_type === 'buy' ? 'Bought' : 'Sold'} {quantity.toFixed(6)} {(trade.asset_symbol ?? '').split('/')[0]} at ${price.toLocaleString()}
                                 {(profitLoss !== 0 || trade.trade_type === 'sell') && (
                                   <span className={profitLoss > 0 ? 'text-green-400' : profitLoss < 0 ? 'text-red-400' : 'text-slate-400'}>
-                                    {' • '}{profitLoss > 0 ? 'Profit' : profitLoss < 0 ? 'Loss' : 'P&L'}: {profitLoss > 0 ? '+' : ''}${Math.abs(profitLoss).toFixed(2)}
+                                    {' • '}{profitLoss > 0 ? 'Profit' : profitLoss < 0 ? 'Loss' : 'P&L'}: {signedMoney(profitLoss)}
                                   </span>
                                 )}
                               </p>
@@ -379,7 +457,7 @@ export default function TradeHistory() {
                           </div>
                           {trade.trade_type === 'buy' && (
                             <p className="text-xs text-slate-400 ml-7">
-                              ℹ️ Position opened • Monitor for take profit/stop loss opportunities
+                              ℹ️ Position opened
                             </p>
                           )}
                           {trade.trade_type === 'sell' && (
@@ -432,17 +510,22 @@ export default function TradeHistory() {
                         </div>
                       )}
 
-                      {/* AI Signal Section */}
-                      {trade.ai_signal && (
+                      {isV6 && <V6TradeDetail trade={trade} />}
+
+                      {/* Old engine's signal. Its score was never a probability: the audit
+                          found its top score (95) was the worst-performing group. */}
+                      {!isV6 && trade.ai_signal && (
                         <div className="border-t border-slate-700 pt-4">
                           <div className="flex items-start gap-2">
                             <Sparkles className="w-5 h-5 text-indigo-400 flex-shrink-0 mt-0.5" />
                             <div className="flex-1">
-                              <div className="flex items-center gap-2 mb-2">
-                                <h4 className="text-indigo-300 font-semibold">AI Trading Signal</h4>
-                                <Badge className="bg-indigo-500/20 text-indigo-400 border-indigo-500/50">
-                                  {trade.ai_signal.signal_strength ?? trade.ai_signal.confidence}/100 strength
-                                </Badge>
+                              <div className="flex items-center gap-2 mb-2 flex-wrap">
+                                <h4 className="text-indigo-300 font-semibold">Old engine signal</h4>
+                                {Number.isFinite(trade.ai_signal.signal_strength ?? trade.ai_signal.confidence) && (
+                                  <Badge className="bg-slate-700 text-slate-300 border-slate-600">
+                                    Indicator score {trade.ai_signal.signal_strength ?? trade.ai_signal.confidence}/100, not a probability
+                                  </Badge>
+                                )}
                               </div>
                               <p className="text-sm text-slate-300 mb-2">
                                 {trade.ai_signal.reasoning}

@@ -399,18 +399,64 @@ const MAJORS = new Set([
  * sorted by 24h quote volume descending. Throws on failure — the caller must
  * treat "no market data" as "do not trade".
  */
+// LOCAL CHANGE: stablecoins and fiat. A pegged asset has no trend to trade,
+// yet its huge volume lets it into a volume-ranked universe (USDG, RLUSD were
+// in the live top 20). Any base starting with USD is caught too, so a newly
+// listed USDx stable does not slip in.
+const STABLE_BASES = new Set([
+  'USDC', 'FDUSD', 'TUSD', 'BUSD', 'DAI', 'USDG', 'RLUSD', 'PYUSD', 'USDS',
+  'USD1', 'USAT', 'USDE', 'USDP', 'USDD', 'GUSD', 'EURC', 'EURT', 'EUR', 'GBP', 'AEUR',
+]);
+export function isStableBase(base) {
+  return typeof base === 'string' && (STABLE_BASES.has(base) || /^USD[A-Z0-9]*$/.test(base));
+}
+
+// LOCAL CHANGE: tokenised stocks / ETFs (XAAPL, XGOOGL, ... OKX instCategory 3)
+// and commodities (XAUT, PAXG: category 4) are listed as SPOT USDT pairs but
+// are not crypto. OKX tags every instrument, so read the tag rather than
+// guessing from names (an "X..." rule would also drop XLM, XTZ, XDC).
+// Refreshed daily; if OKX is unreachable the last good set is kept, and the
+// static commodity list still applies (the Coinbase fallback lists no stocks).
+const NON_CRYPTO_STATIC = new Set(['XAUT', 'PAXG']);
+const NON_CRYPTO_TTL_MS = 24 * 3600e3;
+let nonCryptoCache = { at: 0, bases: new Set() };
+
+export async function fetchNonCryptoBases() {
+  if (Date.now() - nonCryptoCache.at < NON_CRYPTO_TTL_MS && nonCryptoCache.bases.size) return nonCryptoCache.bases;
+  try {
+    const data = await fetchJson(`${OKX}/api/v5/public/instruments?instType=SPOT`, { timeoutMs: PROVIDER_TIMEOUT });
+    if (data.code === '0' && Array.isArray(data.data)) {
+      const bases = new Set(
+        data.data
+          .filter((i) => i.instCategory !== undefined && i.instCategory !== '' && String(i.instCategory) !== '1')
+          .map((i) => i.baseCcy)
+          .filter(Boolean)
+      );
+      if (bases.size) nonCryptoCache = { at: Date.now(), bases };
+    }
+  } catch (err) {
+    console.warn(`[marketData] instrument categories unavailable, keeping last known set: ${err.message}`);
+  }
+  return nonCryptoCache.bases;
+}
+
+export function isCryptoBase(base, nonCryptoBases) {
+  return !NON_CRYPTO_STATIC.has(base) && !(nonCryptoBases && nonCryptoBases.has(base));
+}
+
 export async function fetchUniverse({ topN = 60, minQuoteVolume24h = 5_000_000 } = {}) {
   // Provider chain: OKX first, then Coinbase as fallback.
-  const tickers = await withProvider(
-    (provider) => provider.tickers(),
-    'universe tickers'
-  );
+  const [tickers, nonCrypto] = await Promise.all([
+    withProvider((provider) => provider.tickers(), 'universe tickers'),
+    fetchNonCryptoBases(),
+  ]);
 
   return tickers
     // Leveraged tokens (BTCUP/BTCDOWN) and stable-to-stable pairs behave
     // nothing like spot and must not be scored as if they do.
     .filter((t) => !/(UP|DOWN|BULL|BEAR)USDT$/.test(t.symbol))
-    .filter((t) => !/^(USDC|FDUSD|TUSD|BUSD|DAI|EUR|GBP|AEUR)USDT$/.test(t.symbol))
+    .filter((t) => !isStableBase(t.base))
+    .filter((t) => isCryptoBase(t.base, nonCrypto))
     // Exclude major/popular coins — trade altcoins only.
     .filter((t) => !MAJORS.has(t.base))
     .filter((t) => Number.isFinite(t.price) && t.price > 0)
@@ -558,3 +604,64 @@ export async function fetchHistoricalCandles(symbol, interval, startTime, endTim
 }
 
 export const _internal = { fetchJson, mapLimit, sleep, INTERVAL_MS };
+// ---------------------------------------------------------------------------
+// LOCAL CHANGE (agent committee, phase 2): OKX perpetual derivatives data.
+// Public endpoints, no keys. Read by the committee's Derivatives agent only.
+// ---------------------------------------------------------------------------
+
+/** OKX publishes OI and long/short stats hourly — no point asking more often. */
+const DERIVATIVES_TTL_MS = 15 * 60_000;
+const derivativesCache = new Map(); // symbol -> { at, value }
+
+/** OKX "rubik" stats allow ~5 requests / 2s per IP; pace calls under that. */
+let rubikNextSlot = 0;
+async function rubikPace() {
+  const now = Date.now();
+  const wait = Math.max(0, rubikNextSlot - now);
+  rubikNextSlot = Math.max(now, rubikNextSlot) + 450;
+  if (wait) await sleep(wait);
+}
+
+/**
+ * Funding rate, 24h+ of hourly open interest (USD) and long/short account
+ * ratio for SYMBOL's USDT perpetual.
+ *
+ * Returns null when OKX lists no perpetual for the asset (the agent abstains)
+ * and throws on transport failure so callers can tell "none" from "unknown".
+ * Series are [{ ts, value }], oldest first.
+ */
+export async function fetchDerivatives(symbol) {
+  const cached = derivativesCache.get(symbol);
+  if (cached && Date.now() - cached.at < DERIVATIVES_TTL_MS) return cached.value;
+
+  if (!symbol.endsWith('USDT')) return null;
+  const base = symbol.slice(0, -4);
+  const instId = `${base}-USDT-SWAP`;
+
+  const funding = await fetchJson(`${OKX}/api/v5/public/funding-rate?instId=${instId}`, { timeoutMs: PROVIDER_TIMEOUT, retries: 1 });
+  // 51001 = instrument does not exist: no perpetual, a definite "none".
+  if (funding.code === '51001' || (funding.code === '0' && !funding.data?.length)) {
+    derivativesCache.set(symbol, { at: Date.now(), value: null });
+    return null;
+  }
+  if (funding.code !== '0') throw new Error(`funding-rate ${funding.code}: ${funding.msg}`);
+  const fundingRate = parseFloat(funding.data[0].fundingRate);
+
+  const toSeries = (rows, col) => (Array.isArray(rows) ? rows : [])
+    .map((r) => ({ ts: Number(r[0]), value: parseFloat(r[col]) }))
+    .filter((p) => Number.isFinite(p.ts) && Number.isFinite(p.value))
+    .sort((a, b) => a.ts - b.ts);
+
+  await rubikPace();
+  const oi = await fetchJson(`${OKX}/api/v5/rubik/stat/contracts/open-interest-volume?ccy=${base}&period=1H`, { timeoutMs: PROVIDER_TIMEOUT, retries: 1 });
+  await rubikPace();
+  const ls = await fetchJson(`${OKX}/api/v5/rubik/stat/contracts/long-short-account-ratio?ccy=${base}&period=1H`, { timeoutMs: PROVIDER_TIMEOUT, retries: 1 });
+
+  const value = {
+    fundingRate: Number.isFinite(fundingRate) ? fundingRate : null,
+    openInterest: oi.code === '0' ? toSeries(oi.data, 1) : [],
+    longShort: ls.code === '0' ? toSeries(ls.data, 1) : [],
+  };
+  derivativesCache.set(symbol, { at: Date.now(), value });
+  return value;
+}

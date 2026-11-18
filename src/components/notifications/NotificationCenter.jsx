@@ -36,6 +36,7 @@ import {
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import NotificationRetentionSelect from "./NotificationRetentionSelect";
+import { withoutFabricated } from "./fabricatedNotifications";
 
 export default function NotificationCenter() {
   const [isOpen, setIsOpen] = useState(false);
@@ -43,11 +44,12 @@ export default function NotificationCenter() {
   const [clearedCount, setClearedCount] = useState(0);
   const queryClient = useQueryClient();
 
-  const { data: notifications = [] } = useQuery({
+  const { data: storedNotifications = [] } = useQuery({
     queryKey: ['notifications'],
     queryFn: () => base44.entities.Notification.list('-created_date', 50),
     refetchInterval: 10000, // Refresh every 10 seconds
   });
+  const notifications = withoutFabricated(storedNotifications);
 
   // Every bulk action is one request. The old version fired a write per notification
   // (dozens in parallel for "Mark all read", dozens in sequence for "Clear all"),

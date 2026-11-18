@@ -1,0 +1,52 @@
+{
+  "name": "V6Config",
+  "type": "object",
+  "properties": {
+    "version": {
+      "type": "number"
+    },
+    "risk": {
+      "type": "object"
+    },
+    "venues": {
+      "type": "array"
+    },
+    "roles": {
+      "type": "object"
+    },
+    "strategies": {
+      "type": "object"
+    },
+    "halt_request": {
+      "type": "object"
+    },
+    "reenable_request": {
+      "type": "object"
+    },
+    "close_requests": {
+      "type": "array"
+    },
+    "reinstate_requests": {
+      "type": "array"
+    },
+    "engine_lease": {
+      "type": "object"
+    },
+    "portfolio_id": {
+      "type": "string"
+    },
+    "cutover_at": {
+      "type": "number"
+    },
+    "recutover_request": {
+      "type": "object"
+    },
+    "floor_reset_request": {
+      "type": "object"
+    },
+    "foreign_ack_request": {
+      "type": "object"
+    }
+  },
+  "required": []
+}

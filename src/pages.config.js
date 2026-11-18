@@ -52,12 +52,19 @@ import AdminDashboard from './pages/AdminDashboard';
 import Alerts from './pages/Alerts';
 import AutoTrading from './pages/AutoTrading';
 import Backtesting from './pages/Backtesting';
+import Committee from './pages/Committee'; // LOCAL CHANGE: agent committee, phase 3
+import StrategyLab from './pages/StrategyLab'; // LOCAL CHANGE: strategy lab
 import ExchangeSettings from './pages/ExchangeSettings';
 import Home from './pages/Home';
 import Insights from './pages/Insights';
 import TradeHistory from './pages/TradeHistory';
 import Security from './pages/Security';
 import Trading from './pages/Trading';
+import MissionControl from './pages/MissionControl';
+import Strategies from './pages/Strategies';
+import SignalTests from './pages/SignalTests';
+import RiskControls from './pages/RiskControls';
+import Exchanges from './pages/Exchanges';
 import __Layout from './Layout.jsx';
 
 
@@ -67,12 +74,19 @@ export const PAGES = {
     "Alerts": Alerts,
     "AutoTrading": AutoTrading,
     "Backtesting": Backtesting,
+    "Committee": Committee,
+    "StrategyLab": StrategyLab,
     "ExchangeSettings": ExchangeSettings,
     "Home": Home,
     "Insights": Insights,
     "TradeHistory": TradeHistory,
     "Security": Security,
     "Trading": Trading,
+    "MissionControl": MissionControl,
+    "Strategies": Strategies,
+    "SignalTests": SignalTests,
+    "RiskControls": RiskControls,
+    "Exchanges": Exchanges,
 }
 
 export const pagesConfig = {

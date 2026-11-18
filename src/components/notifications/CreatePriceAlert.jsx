@@ -80,7 +80,7 @@ export default function CreatePriceAlert({ asset, onClose }) {
   ];
 
   const aiAlertTypes = [
-    { value: 'ai_pattern', label: 'AI Pattern Detection', icon: Sparkles, color: 'text-indigo-400', category: 'ai' },
+    { value: 'ai_pattern', label: 'Pattern Detection', icon: Sparkles, color: 'text-indigo-400', category: 'ai' },
   ];
 
   const allAlertTypes = [...priceAlertTypes, ...volumeAlertTypes, ...technicalAlertTypes, ...aiAlertTypes];
@@ -164,7 +164,7 @@ export default function CreatePriceAlert({ asset, onClose }) {
 
           <div>
             <Label className="text-slate-300 mb-2 block">
-              Min AI Confidence: {alertData.ai_pattern_config?.min_confidence || 75}%
+              Minimum pattern score: {alertData.ai_pattern_config?.min_confidence || 75} (not a probability)
             </Label>
             <Input
               type="range"
@@ -468,11 +468,11 @@ export default function CreatePriceAlert({ asset, onClose }) {
             </TabsContent>
 
             <TabsContent value="technical" className="mt-4">
-              {renderAlertTypeSelector(technicalAlertTypes, 'Technical Indicators')}
+              {renderAlertTypeSelector(technicalAlertTypes, 'Technical Indicators (saved, not monitored yet)')}
             </TabsContent>
 
             <TabsContent value="ai" className="mt-4">
-              {renderAlertTypeSelector(aiAlertTypes, 'AI-Powered Detection')}
+              {renderAlertTypeSelector(aiAlertTypes, 'Pattern Detection (saved, not monitored yet)')}
             </TabsContent>
           </Tabs>
 
@@ -531,7 +531,7 @@ export default function CreatePriceAlert({ asset, onClose }) {
                 <Bell className="w-5 h-5 text-indigo-400" />
                 <div className="flex-1">
                   <Label htmlFor="in_app" className="text-slate-300 cursor-pointer">In-App Notification</Label>
-                  <p className="text-xs text-slate-500">Real-time alerts in the app</p>
+                  <p className="text-xs text-slate-500">Shown in the app while the Trading page is open</p>
                 </div>
               </div>
 
@@ -548,7 +548,7 @@ export default function CreatePriceAlert({ asset, onClose }) {
                   <MessageSquare className="w-5 h-5 text-indigo-400" />
                   <div className="flex-1">
                     <Label htmlFor="discord" className="text-slate-300 cursor-pointer">Discord</Label>
-                    <p className="text-xs text-slate-500">Send to Discord webhook</p>
+                    <p className="text-xs text-slate-500">Saved only. Messages are not sent yet</p>
                   </div>
                 </div>
                 {alertData.notification_method.includes('discord') && (
@@ -575,7 +575,7 @@ export default function CreatePriceAlert({ asset, onClose }) {
                   <Send className="w-5 h-5 text-blue-400" />
                   <div className="flex-1">
                     <Label htmlFor="telegram" className="text-slate-300 cursor-pointer">Telegram</Label>
-                    <p className="text-xs text-slate-500">Send to Telegram bot</p>
+                    <p className="text-xs text-slate-500">Saved only. Messages are not sent yet</p>
                   </div>
                 </div>
                 {alertData.notification_method.includes('telegram') && (

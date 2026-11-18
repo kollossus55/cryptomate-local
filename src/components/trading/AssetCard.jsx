@@ -114,7 +114,7 @@ export default function AssetCard({ asset, rank, onTrade, onAnalyze }) {
           <div className="flex items-center justify-between gap-2">
             <Badge className={`${getConfidenceColor(confidence)} border-2 font-bold px-3 py-1 flex items-center gap-1`}>
               <Sparkles className="w-3 h-3" />
-              {confidence}/100 Signal Strength
+              Indicator score {confidence}/100, not a probability
             </Badge>
             <div className="flex items-center gap-1 text-xs text-slate-500">
               <Clock className="w-3 h-3" />

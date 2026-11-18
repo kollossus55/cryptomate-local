@@ -1,0 +1,40 @@
+{
+  "name": "V6RiskEvent",
+  "type": "object",
+  "properties": {
+    "t": {
+      "type": "number"
+    },
+    "type": {
+      "type": "string"
+    },
+    "severity": {
+      "type": "string"
+    },
+    "code": {
+      "type": "string"
+    },
+    "message": {
+      "type": "string"
+    },
+    "data": {
+      "type": "object"
+    },
+    "sticky": {
+      "type": "boolean"
+    },
+    "acked_at": {
+      "type": "string"
+    },
+    "cleared_at": {
+      "type": "string"
+    },
+    "before": {
+      "type": "object"
+    },
+    "after": {
+      "type": "object"
+    }
+  },
+  "required": []
+}

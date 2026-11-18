@@ -20,7 +20,10 @@ import { fileURLToPath } from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SRC = path.join(ROOT, 'shared', 'trading');
 
-const FUNCTION_DIRS = ['autoTradingWorker', 'altcoinScannerWorker', 'technicalAnalysis'];
+const LEGACY_DIRS = ['autoTradingWorker', 'altcoinScannerWorker', 'technicalAnalysis', 'resolveCommitteeOutcomes', 'strategyLabWorker'];
+// V6 folders take every v6*.js, so a new V6 module cannot be silently left out.
+const V6_DIRS = ['v6Engine', 'v6Control'];
+const FUNCTION_DIRS = [...LEGACY_DIRS, ...V6_DIRS];
 
 const header =
   '// GENERATED FILE — DO NOT EDIT.\n' +
@@ -37,24 +40,29 @@ let errors = 0;
 
 for (const dir of FUNCTION_DIRS) {
   const destDir = path.join(ROOT, 'base44', 'functions', dir, 'shared');
+  const isV6 = V6_DIRS.includes(dir);
+  if (isV6) mkdirSync(destDir, { recursive: true });
   if (!existsSync(destDir)) {
     console.error(`Missing destination folder (skipping): ${destDir}`);
     errors++;
     continue;
   }
   for (const file of sources) {
+    if (isV6 && !file.startsWith('v6')) continue;
     const body = readFileSync(path.join(SRC, file), 'utf8');
     // A destination file that is NOT also a source file is not ours to replace
     // (the folders may carry local-only modules); report it so nobody blindly
     // assumes the trees are identical.
     const destPath = path.join(destDir, file);
     try {
-      statSync(destPath);
+      if (!isV6) statSync(destPath);
     } catch {
       console.log(`  note: ${file} exists only in shared/trading — not present in ${dir}/shared (not copied)`);
       continue;
     }
-    writeFileSync(destPath, header + body, 'utf8');
+    // Match the body's line endings: a mixed file shows as modified on a CRLF checkout.
+    const eol = body.includes('\r\n') ? '\r\n' : '\n';
+    writeFileSync(destPath, header.replace(/\n/g, eol) + body, 'utf8');
     console.log(`synced ${dir}/shared/${file}`);
   }
 }

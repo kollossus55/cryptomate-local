@@ -1,5 +1,5 @@
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { base44 } from "@/api/base44Client";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
@@ -29,10 +29,12 @@ import {
 import { motion, AnimatePresence } from "framer-motion";
 
 import CreatePriceAlert from "../components/notifications/CreatePriceAlert";
+import { withoutFabricated } from "../components/notifications/fabricatedNotifications";
+
+const MONITORED_TYPES = ['price_above', 'price_below', 'price_change_percent', 'volume_spike', 'volatility'];
 
 export default function Alerts() {
   const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
-  const [monitoringActive, setMonitoringActive] = useState(false);
   const queryClient = useQueryClient();
 
   const { data: alerts = [] } = useQuery({
@@ -58,33 +60,6 @@ export default function Alerts() {
       queryClient.invalidateQueries({ queryKey: ['price-alerts'] });
     },
   });
-
-  useEffect(() => {
-    if (!monitoringActive || alerts.length === 0) return;
-
-    const checkAlerts = async () => {
-      const activeAlerts = alerts.filter(a => a.is_active);
-      
-      // Simulate an AI anomaly notification
-      if (Math.random() > 0.95) {
-        await base44.entities.Notification.create({
-          notification_type: 'ai_anomaly',
-          priority: 'high',
-          title: 'Unusual Market Activity Detected',
-          message: 'AI detected abnormal trading patterns in BTC/USDT. Volume spike of 340% in last 15 minutes.',
-          data: {
-            asset: 'BTC/USDT',
-            anomaly_type: 'volume_spike',
-            confidence: 87,
-            details: 'Large institutional buy orders detected'
-          }
-        });
-      }
-    };
-
-    const interval = setInterval(checkAlerts, 30000);
-    return () => clearInterval(interval);
-  }, [monitoringActive, alerts]);
 
   const handleToggleAlert = async (alert) => {
     await updateAlertMutation.mutateAsync({
@@ -145,7 +120,7 @@ export default function Alerts() {
       bollinger_breakout: 'Bollinger Breakout',
       support_break: 'Support Break',
       resistance_break: 'Resistance Break',
-      ai_pattern: 'AI Pattern'
+      ai_pattern: 'Pattern'
     };
     return labels[type] || type;
   };
@@ -155,8 +130,7 @@ export default function Alerts() {
     // AI Pattern specific description
     if (alert.alert_type === 'ai_pattern') {
       const patternType = alert.ai_pattern_config?.pattern_type || 'Pattern';
-      const minConfidence = alert.ai_pattern_config?.min_confidence || 75;
-      return `${patternType} (${minConfidence}% confidence)`;
+      return patternType;
     }
     
     // RSI specific description
@@ -206,7 +180,7 @@ export default function Alerts() {
   };
 
   const activeAlertsCount = alerts.filter(a => a.is_active).length;
-  const recentNotifications = notifications.slice(0, 5);
+  const recentNotifications = withoutFabricated(notifications).slice(0, 5);
 
   // New categorization for alerts
   const alertsByType = {
@@ -232,76 +206,23 @@ export default function Alerts() {
           <h1 className="text-4xl font-bold mb-2 bg-gradient-to-r from-indigo-400 to-purple-400 bg-clip-text text-transparent">
             Alerts & Notifications
           </h1>
-          <p className="text-slate-400">Advanced monitoring with technical indicators and AI patterns</p> {/* Updated text */}
+          <p className="text-slate-400">Your price alerts and recent notifications</p>
         </div>
 
-        {/* Monitoring Status */}
-        <Card className={`mb-8 border-2 transition-all duration-300 ${
-          monitoringActive 
-            ? 'bg-gradient-to-br from-green-600/30 to-emerald-600/30 border-green-400' 
-            : 'bg-gradient-to-br from-slate-800 to-slate-900 border-slate-600'
-        }`}>
+        {/* What is really checked, so an alert that stays quiet is not mistaken for a calm market */}
+        <Card className="mb-8 bg-slate-900 border-slate-700">
           <CardContent className="pt-6">
-            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-              <div className="flex items-center gap-4">
-                <div className={`w-16 h-16 rounded-2xl flex items-center justify-center transition-all duration-300 ${
-                  monitoringActive 
-                    ? 'bg-green-500 animate-pulse shadow-xl shadow-green-500/50' 
-                    : 'bg-slate-700'
-                }`}>
-                  <Sparkles className="w-8 h-8 text-white" />
-                </div>
-                <div>
-                  <h3 className="text-2xl font-bold mb-1 text-white">
-                    Alert Monitoring
-                  </h3>
-                  <p className="text-base font-medium text-white">
-                    {monitoringActive 
-                      ? `✓ Monitoring ${activeAlertsCount} active ${activeAlertsCount === 1 ? 'alert' : 'alerts'}`
-                      : 'Enable monitoring to receive real-time alerts'
-                    }
-                  </p>
-                </div>
-              </div>
-              
-              <div className="flex items-center gap-4">
-                <Badge className={`font-bold px-6 py-3 ${
-                  monitoringActive 
-                    ? 'text-xl bg-green-500 text-white border-green-400' 
-                    : 'text-sm bg-slate-700 text-white border-slate-500'
-                }`}>
-                  {monitoringActive ? '⚡ ACTIVE' : 'Inactive'}
-                </Badge>
-                <Switch
-                  checked={monitoringActive}
-                  onCheckedChange={setMonitoringActive}
-                  className={`data-[state=checked]:bg-green-500 scale-150 ${
-                    monitoringActive ? 'shadow-lg shadow-green-500/50' : ''
-                  } transition-all`}
-                />
+            <div className="flex items-start gap-3">
+              <AlertCircle className="w-5 h-5 text-slate-400 flex-shrink-0 mt-0.5" />
+              <div className="space-y-1 text-sm text-slate-300">
+                <p className="font-semibold text-white">
+                  {activeAlertsCount} active {activeAlertsCount === 1 ? 'alert' : 'alerts'}. How they are checked:
+                </p>
+                <p>Price, percent change, volume and volatility alerts are checked in your browser, only while the legacy Trading page is open.</p>
+                <p>Technical and pattern alerts are saved but not monitored, so they never fire. Discord and Telegram messages are not sent.</p>
+                <p className="text-slate-400">Every notification comes from a recorded event. V6 alarms are separate: see Mission Control.</p>
               </div>
             </div>
-            
-            {monitoringActive && (
-              <motion.div
-                initial={{ opacity: 0, height: 0 }}
-                animate={{ opacity: 1, height: 'auto' }}
-                className="mt-6 p-4 bg-blue-500/30 border-2 border-blue-400 rounded-xl"
-              >
-                <div className="flex items-start gap-3">
-                  <AlertCircle className="w-5 h-5 text-blue-100 flex-shrink-0 mt-0.5" />
-                  <div>
-                    <p className="text-sm font-bold text-white mb-1">
-                      Demo Mode Active
-                    </p>
-                    <p className="text-sm text-white/90 leading-relaxed">
-                      <strong>Simulated monitoring:</strong> Technical indicators and AI patterns are demonstrated. 
-                      External notifications (Discord/Telegram) are simulated. With backend functions, real-time analysis would trigger alerts instantly.
-                    </p>
-                  </div>
-                </div>
-              </motion.div>
-            )}
           </CardContent>
         </Card>
 
@@ -337,7 +258,7 @@ export default function Alerts() {
             <CardContent className="pt-6">
               <div className="flex items-center justify-between">
                 <div>
-                  <p className="text-slate-400 text-sm mb-1">AI Patterns</p>
+                  <p className="text-slate-400 text-sm mb-1">Patterns</p>
                   <p className="text-3xl font-bold text-indigo-400">{alertsByType.ai.length}</p>
                 </div>
                 <Sparkles className="w-10 h-10 text-indigo-400" />
@@ -417,7 +338,7 @@ export default function Alerts() {
                                 {/* New Badges for alert types */}
                                 {alert.alert_type === 'ai_pattern' && (
                                   <Badge className="bg-indigo-500/20 text-indigo-400 text-xs">
-                                    AI
+                                    Pattern
                                   </Badge>
                                 )}
                                 {(alert.alert_type.includes('rsi_') || 
@@ -437,9 +358,13 @@ export default function Alerts() {
                             </div>
                             
                             <div className="flex items-center gap-2">
-                              <Badge className={alert.is_active ? 'bg-green-500/20 text-green-400' : 'bg-slate-500/20 text-slate-400'}>
-                                {alert.is_active ? 'Active' : 'Inactive'}
-                              </Badge>
+                              {MONITORED_TYPES.includes(alert.alert_type) ? (
+                                <Badge className={alert.is_active ? 'bg-green-500/20 text-green-400' : 'bg-slate-500/20 text-slate-400'}>
+                                  {alert.is_active ? 'Active' : 'Inactive'}
+                                </Badge>
+                              ) : (
+                                <Badge className="bg-amber-500/20 text-amber-300">Not monitored</Badge>
+                              )}
                             </div>
                           </div>
                           

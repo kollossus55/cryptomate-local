@@ -3,7 +3,7 @@
  */
 
 import assert from 'node:assert';
-import { mkdtempSync, rmSync, existsSync, readdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, readdirSync, readFileSync, writeFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -171,6 +171,45 @@ test('reset survives a reload from disk', () => {
   const reopened = new EntityStore(dir);
   assert.strictEqual(reopened.list('Trade', {}).length, 0, 'trades came back after reload');
   assert.strictEqual(reopened.list('Portfolio', {})[0].available_balance, 10000);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('the good copy is written before the main file, so a crash between them is not damage', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'cm-order-'));
+  const store = new EntityStore(dir);
+  const row = store.create('AutoTradingSettings', { is_enabled: false });
+  const file = path.join(dir, 'entities', 'AutoTradingSettings.json');
+  // Simulate the crash: the delete reached the good copy, then the process died.
+  writeFileSync(`${file}.good`, '[]');
+  const reopened = new EntityStore(dir);
+  assert.strictEqual(reopened.list('AutoTradingSettings', {}).length, 1, 'the main file is one write behind, not restored');
+  assert.strictEqual(reopened.list('V6RiskEvent', {}).length, 0, 'no store_restored alarm');
+  assert.strictEqual(reopened.get('AutoTradingSettings', row.id).id, row.id);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('a read-only store reports damage and changes nothing on disk', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'cm-ro-'));
+  const store = new EntityStore(dir);
+  store.create('Portfolio', { total_balance: 5000 });
+  const file = path.join(dir, 'entities', 'Portfolio.json');
+  writeFileSync(file, '[]');
+  const listing = () => readdirSync(path.join(dir, 'entities')).sort().join(',');
+  const before = listing();
+
+  const ro = new EntityStore(dir, { readOnly: true });
+  assert.strictEqual(ro.list('Portfolio', {})[0].total_balance, 5000, 'reads the good copy');
+  assert.strictEqual(ro.damaged.get('Portfolio'), 'empty');
+  assert.strictEqual(ro.list('V6RiskEvent', {}).length, 0);
+  assert.throws(() => ro.create('Trade', { x: 1 }), /read-only/);
+  assert.strictEqual(readFileSync(file, 'utf8'), '[]', 'the file is left as found');
+  assert.strictEqual(listing(), before, 'no file added');
+
+  writeFileSync(file, '{not json');
+  const ro2 = new EntityStore(dir, { readOnly: true });
+  assert.strictEqual(ro2.list('Portfolio', {}).length, 1);
+  assert.strictEqual(ro2.damaged.get('Portfolio'), 'unreadable');
+  assert.strictEqual(listing(), before, 'no salvage copy written');
   rmSync(dir, { recursive: true, force: true });
 });
 

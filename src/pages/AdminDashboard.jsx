@@ -2,6 +2,7 @@
 import { useState } from "react";
 import { base44 } from "@/api/base44Client";
 import ResetTradingData from "@/components/security/ResetTradingData";
+import { v6RecordExists, V6_RESET_REFUSED } from "@/lib/v6Trades";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -111,6 +112,11 @@ export default function AdminDashboard() {
   const handleResetUserData = async (user) => {
     if (window.confirm(`Reset the portfolio for ${user.email}?\n\nThis resets the balance and closes all positions. Trade HISTORY is kept — use "Reset trading data" on the Database tab to clear that too.`)) {
       try {
+        if (await v6RecordExists()) {
+          alert(V6_RESET_REFUSED);
+          return;
+        }
+
         // Find user's portfolio
         const userPortfolio = portfolios.find(p => p.created_by === user.email);
         

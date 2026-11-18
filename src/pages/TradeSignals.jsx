@@ -510,7 +510,7 @@ export default function TradeSignals() {
                         <div className={`text-3xl font-bold ${getConfidenceColor(rec.confidence)}`}>
                           {rec.confidence}%
                         </div>
-                        <p className="text-slate-500 text-xs">Confidence</p>
+                        <p className="text-slate-500 text-xs">Score (not a probability)</p>
                       </div>
                     </div>
 
@@ -534,7 +534,7 @@ export default function TradeSignals() {
                           </div>
                           {rec.prediction_confidence != null && (
                             <div className="text-right">
-                              <span className="text-xs text-purple-300">Pred. Confidence</span>
+                              <span className="text-xs text-purple-300">Model score</span>
                               <div className="text-lg font-bold text-purple-400">
                                 {rec.prediction_confidence}%
                               </div>

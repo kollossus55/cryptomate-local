@@ -1,0 +1,39 @@
+{
+  "name": "V6Certificate",
+  "type": "object",
+  "properties": {
+    "strategy_id": {
+      "type": "string"
+    },
+    "strategy_version": {
+      "type": "string"
+    },
+    "hash": {
+      "type": "string"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "valid",
+        "failed",
+        "stale"
+      ]
+    },
+    "issued_at": {
+      "type": "string"
+    },
+    "trial_count": {
+      "type": "number"
+    },
+    "holdout_clean": {
+      "type": "boolean"
+    },
+    "criteria": {
+      "type": "array"
+    },
+    "expected": {
+      "type": "object"
+    }
+  },
+  "required": []
+}

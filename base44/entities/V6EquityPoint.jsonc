@@ -1,0 +1,25 @@
+{
+  "name": "V6EquityPoint",
+  "type": "object",
+  "properties": {
+    "t": {
+      "type": "number"
+    },
+    "equity": {
+      "type": "number"
+    },
+    "cash": {
+      "type": "number"
+    },
+    "btc_price": {
+      "type": "number"
+    },
+    "drawdown_pct": {
+      "type": "number"
+    },
+    "exposure_pct": {
+      "type": "number"
+    }
+  },
+  "required": []
+}

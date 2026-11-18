@@ -30,7 +30,11 @@
 
 import { scoreAsset, MIN_CANDLES } from './signalEngine.js';
 import { applyCosts } from './costs.js';
-import { atr } from './indicators.js';
+import { atr, atrPercent } from './indicators.js';
+// LOCAL CHANGE (agent committee, phase 2): committee replay mode.
+import { runCommittee, buildMarketContext, filterVerdict } from './committee.js';
+
+const INTERVAL_NAMES = { 900_000: '15m', 1_800_000: '30m', 3_600_000: '1h', 14_400_000: '4h', 86_400_000: '1d' };
 
 /**
  * @param {Map<string, Array>} candlesBySymbol  real OHLCV, oldest first
@@ -56,7 +60,36 @@ export function runBacktest(candlesBySymbol, config = {}) {
     // scaled by *24); on any other interval the Sharpe/Sortino and slippage
     // numbers were quietly wrong. Default keeps the old hourly behaviour.
     candleIntervalMs = 3_600_000,
+    // LOCAL CHANGE (agent committee, phase 2): 'legacy' (default, unchanged
+    // behaviour) gates entries on scoreAsset strength; 'committee' gates on
+    // the agent committee's decision. Committee replay sees the same trailing
+    // window the live worker fetches (committeeLookback bars), BTC context
+    // from btcSymbol if it is in the data, and NO derivatives or order book —
+    // there is no honest history for those, so those agents abstain as
+    // no-data. Exits, sizing and costs are identical in both modes.
+    // 'filter': legacy picks entries exactly as in 'legacy' mode, then the
+    // committee may only block one (committee.filterVerdict). BTC is context,
+    // never a candidate, as in 'committee' mode.
+    entryEngine = 'legacy',
+    committeeSettings = {},
+    committeeLookback = 200,
+    btcSymbol = 'BTCUSDT',
+    // LOCAL CHANGE (walk-forward research): take-profit as a multiple of the
+    // position's own stop distance (2 = target at 2x the stop). null keeps the
+    // flat takeProfitPercent. Exits only — sizing and the stop are unchanged.
+    takeProfitR = null,
+    // Score legacy signals on the last N bars only (the live worker fetches
+    // 200). null = full history, the original behaviour.
+    signalLookback = null,
+    // Mirror the live "bearish confluence exit": after a bar closes, if the
+    // held asset's scoreAsset strength is below this number, sell at the NEXT
+    // bar's open. null = off (original behaviour: stop / target only).
+    signalExitBelow = null,
   } = config;
+  const committeeMode = entryEngine === 'committee';
+  const filterMode = entryEngine === 'filter';
+  let blockedByFilter = 0;
+  const committeeInterval = INTERVAL_NAMES[candleIntervalMs] || '1h';
 
   const symbols = [...candlesBySymbol.keys()];
   if (symbols.length === 0) {
@@ -149,7 +182,7 @@ export function runBacktest(candlesBySymbol, config = {}) {
         // 6% stop" while actually risking 1% at a 3% stop, so per-trade risk
         // quietly depended on each asset's ATR rather than the configured %.
         stopPrice: costs.fillPrice * (1 - entry.stopDistancePercent / 100),
-        targetPrice: costs.fillPrice * (1 + takeProfitPercent / 100),
+        targetPrice: costs.fillPrice * (1 + (takeProfitR ? takeProfitR * entry.stopDistancePercent : takeProfitPercent) / 100),
       });
     }
     pendingEntries = [];
@@ -166,9 +199,13 @@ export function runBacktest(candlesBySymbol, config = {}) {
       let exitPrice = null;
       let exitReason = null;
 
+      // A signal exit decided on the previous close fills at this bar's open.
+      if (position.exitAtOpen) {
+        exitPrice = bar.open;
+        exitReason = 'signal_exit';
       // Stop checked first. If the bar spans both levels we cannot know the
       // order without tick data, so we assume the unfavourable one filled.
-      if (bar.low <= position.stopPrice) {
+      } else if (bar.low <= position.stopPrice) {
         // LOCAL FIX: honour gaps. If the bar OPENED beyond the stop — illiquid
         // alts gap several percent between hourly bars — the price never
         // actually traded at the stop level. Filling there instead of at the
@@ -239,6 +276,12 @@ export function runBacktest(candlesBySymbol, config = {}) {
           position.trailingStop = newStop;
         }
       }
+
+      if (signalExitBelow !== null) {
+        const held = candles.slice(signalLookback ? Math.max(0, idx + 1 - signalLookback) : 0, idx + 1);
+        const sig = scoreAsset(held, { indicators });
+        if (sig && sig.strength < signalExitBelow) position.exitAtOpen = true;
+      }
     }
 
     // ---------------------------------------------------------------------
@@ -247,18 +290,53 @@ export function runBacktest(candlesBySymbol, config = {}) {
     if (positions.size < maxPositions) {
       const candidates = [];
 
+      // Committee mode: the trailing window per symbol, and the market context
+      // built from those same windows — all strictly bars <= t.
+      let windows = null;
+      let market = null;
+      if (committeeMode || filterMode) {
+        windows = new Map();
+        for (const symbol of symbols) {
+          const idx = indexBySymbol.get(symbol).get(barTime);
+          if (idx === undefined) continue;
+          const candles = candlesBySymbol.get(symbol);
+          windows.set(symbol, candles.slice(Math.max(0, idx + 1 - committeeLookback), idx + 1));
+        }
+        market = buildMarketContext(windows, windows.get(btcSymbol) || null);
+      }
+
       for (const symbol of symbols) {
         if (positions.has(symbol)) continue;
         const candles = candlesBySymbol.get(symbol);
         const idx = indexBySymbol.get(symbol).get(barTime);
         if (idx === undefined || idx < warmupBars) continue;
 
+        if (committeeMode) {
+          if (symbol === btcSymbol) continue; // context, not a candidate — mirrors an altcoin universe
+          const windowCandles = windows.get(symbol);
+          const result = runCommittee({ symbol, candles: windowCandles, interval: committeeInterval, market }, committeeSettings);
+          if (result && result.decision === 'enter') {
+            candidates.push({
+              symbol,
+              signal: { strength: Math.round(result.committeeScore * 100), atrPercent: atrPercent(windowCandles) },
+              visible: windowCandles,
+            });
+          }
+          continue;
+        }
+
+        if (filterMode && symbol === btcSymbol) continue;
+
         // The critical slice. Only bars up to and including t are visible.
-        const visible = candles.slice(0, idx + 1);
+        const visible = candles.slice(signalLookback ? Math.max(0, idx + 1 - signalLookback) : 0, idx + 1);
         const signal = scoreAsset(visible, { indicators });
         if (!signal) continue;
 
         if (signal.strength >= minStrength && signal.direction === 'bullish') {
+          if (filterMode) {
+            const result = runCommittee({ symbol, candles: windows.get(symbol), interval: committeeInterval, market }, committeeSettings);
+            if (filterVerdict(result, committeeSettings).verdict === 'block') { blockedByFilter++; continue; }
+          }
           candidates.push({ symbol, signal, visible });
         }
       }
@@ -370,7 +448,7 @@ export function runBacktest(candlesBySymbol, config = {}) {
 
   const benchmark = calculateBuyAndHold(candlesBySymbol, timeline, warmupBars, initialCapital);
 
-  return { trades, equityCurve, metrics, benchmark, config, barsSimulated: timeline.length - warmupBars - 1 };
+  return { trades, equityCurve, metrics, benchmark, config, barsSimulated: timeline.length - warmupBars - 1, blockedByFilter };
 }
 
 // ---------------------------------------------------------------------------

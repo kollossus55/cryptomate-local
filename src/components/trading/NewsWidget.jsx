@@ -7,10 +7,25 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Newspaper, TrendingUp, TrendingDown, Clock, ExternalLink, Bell, Filter, RefreshCw } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { base44 } from "@/api/base44Client";
-import { fetchMarketIntelligence } from "./AdvancedSignalGenerator";
+import { fetchMarketIntelligence, marketIntelligenceRetryInMs } from "./AdvancedSignalGenerator";
 
-export default function NewsWidget({ assets, onNewsAlert, isCompact = false }) {
-  const [newsFeed, setNewsFeed] = useState([]);
+const POLL_MS = 5 * 60 * 1000;
+const NOTIFIED_KEY = 'cryptomate.newsNotified';
+const NOTIFIED_MAX = 200;
+
+// A headline stays in the feed for many polls, so remember what was already
+// raised. Otherwise each poll would file the same story as a new alert.
+const readNotified = () => {
+  try { return JSON.parse(localStorage.getItem(NOTIFIED_KEY)) || []; } catch { return []; }
+};
+const writeNotified = (keys) => {
+  try { localStorage.setItem(NOTIFIED_KEY, JSON.stringify(keys.slice(-NOTIFIED_MAX))); } catch { /* best effort */ }
+};
+
+export default function NewsWidget({ assets = [], onNewsAlert, isCompact = false }) {
+  // Keyed by asset. One asset refreshes per poll, so the others keep their last stories.
+  const [newsByAsset, setNewsByAsset] = useState({});
+  const [retryInMs, setRetryInMs] = useState(0);
   const [selectedAsset, setSelectedAsset] = useState("all");
   const [sentimentFilter, setSentimentFilter] = useState("all");
   const [isLoading, setIsLoading] = useState(false);
@@ -18,6 +33,8 @@ export default function NewsWidget({ assets, onNewsAlert, isCompact = false }) {
   // Refs to hold latest data for the interval callback
   const assetsRef = useRef(assets);
   const selectedAssetRef = useRef(selectedAsset);
+  const retrievedAtRef = useRef({});
+  const busyRef = useRef(false);
 
   useEffect(() => {
     assetsRef.current = assets;
@@ -28,68 +45,64 @@ export default function NewsWidget({ assets, onNewsAlert, isCompact = false }) {
   const assetSymbols = useMemo(() => assets.map(a => a.symbol).join(','), [assets]);
 
   useEffect(() => {
-    if (assets && assets.length > 0) {
-      fetchNewsForAssets();
-      
-      // Refresh news every 5 minutes
-      const interval = setInterval(fetchNewsForAssets, 5 * 60 * 1000);
+    if (assetSymbols) {
+      refreshNews();
+      const interval = setInterval(refreshNews, POLL_MS);
       return () => clearInterval(interval);
     }
   }, [assetSymbols, selectedAsset]);
 
-  const fetchNewsForAssets = async () => {
+  // The server allows one search a minute, so asking for five assets at once
+  // meant four refusals on every poll. Each poll now takes the asset whose
+  // stories are oldest, and a hidden tab does not poll at all.
+  const refreshNews = async () => {
+    if (busyRef.current || document.hidden) return;
+
+    const currentAssets = assetsRef.current || [];
+    const currentSelected = selectedAssetRef.current;
+    const candidates = currentSelected === "all"
+      ? currentAssets.slice(0, 5)
+      : currentAssets.filter(a => a.symbol === currentSelected);
+    const retrievedAt = (a) => retrievedAtRef.current[a.symbol] ?? 0;
+    const asset = [...candidates].sort((a, b) => retrievedAt(a) - retrievedAt(b))[0];
+    if (!asset) return;
+
+    busyRef.current = true;
     setIsLoading(true);
     try {
-      const currentAssets = assetsRef.current;
-      const currentSelected = selectedAssetRef.current;
+      // Real news only: live web search via backend function. No simulated fallback.
+      const intelligence = await fetchMarketIntelligence(asset);
+      setRetryInMs(intelligence ? 0 : marketIntelligenceRetryInMs());
+      if (!intelligence) return;
 
-      const assetsToFetch = currentSelected === "all"
-        ? currentAssets.slice(0, 5) // Top 5 for "all" view
-        : currentAssets.filter(a => a.symbol === currentSelected);
+      retrievedAtRef.current[asset.symbol] = Date.now();
+      const newsData = intelligence.news;
+      const newsItems = (newsData?.key_headlines ?? []).map((headline, idx) => ({
+        id: `${asset.symbol}-${idx}-${headline.substring(0, 20).replace(/\s+/g, '')}`,
+        asset: asset.symbol,
+        headline: headline,
+        sentiment: newsData.sentiment_label,
+        sentiment_score: newsData.sentiment_score,
+        impact: newsData.impact_level,
+        timestamp: intelligence.fetchedAt, // when it was retrieved, not when it was published
+        source: newsData.sources?.[idx] || "Web Search",
+        summary: idx === 0 ? newsData.summary : null
+      }));
 
-      const newsItems = [];
-      const fetchedAt = new Date().toISOString(); // honest "retrieved at" time
-
-      for (const asset of assetsToFetch) {
-        // Real news only — live web search via backend function. No simulated fallback.
-        const intelligence = await fetchMarketIntelligence(asset);
-        const newsData = intelligence?.news || null;
-
-        if (newsData && newsData.key_headlines?.length > 0) {
-          newsData.key_headlines.forEach((headline, idx) => {
-            newsItems.push({
-              id: `${asset.symbol}-${idx}-${headline.substring(0, 20).replace(/\s+/g, '')}`,
-              asset: asset.symbol,
-              headline: headline,
-              sentiment: newsData.sentiment_label,
-              sentiment_score: newsData.sentiment_score,
-              impact: newsData.impact_level,
-              timestamp: fetchedAt,
-              source: newsData.sources?.[idx] || "Web Search",
-              summary: idx === 0 ? newsData.summary : null
-            });
-          });
-        }
-      }
-
-      newsItems.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-
-      setNewsFeed(newsItems);
-
-      // Check for high-impact news and create alerts
+      setNewsByAsset(prev => ({ ...prev, [asset.symbol]: newsItems }));
       checkForSignificantNews(newsItems);
-    } catch (error) {
-      console.error("Failed to fetch news:", error);
     } finally {
+      busyRef.current = false;
       setIsLoading(false);
     }
   };
 
   const checkForSignificantNews = async (newsItems) => {
+    const notified = readNotified();
     const highImpactNews = newsItems.filter(
-      news => news.impact === 'high' && 
-      (Math.abs(news.sentiment_score) > 0.5) &&
-      (Date.now() - new Date(news.timestamp).getTime() < 3600000) // Within last hour
+      news => news.impact === 'high' &&
+      Math.abs(news.sentiment_score) > 0.5 &&
+      !notified.includes(`${news.asset}|${news.headline}`)
     );
 
     for (const news of highImpactNews) {
@@ -97,14 +110,14 @@ export default function NewsWidget({ assets, onNewsAlert, isCompact = false }) {
         onNewsAlert(news);
       }
 
-      // Create notification
       try {
         await base44.entities.Notification.create({
-          notification_type: 'ai_anomaly',
+          notification_type: 'system',
           priority: 'high',
-          title: `📰 High Impact News: ${news.asset}`,
+          title: `News: ${news.asset}`,
           message: news.headline,
           data: {
+            source: 'news_web_search',
             asset: news.asset,
             sentiment: news.sentiment,
             sentiment_score: news.sentiment_score,
@@ -112,10 +125,12 @@ export default function NewsWidget({ assets, onNewsAlert, isCompact = false }) {
             news_headline: news.headline
           }
         });
+        notified.push(`${news.asset}|${news.headline}`);
       } catch (error) {
         console.error("Failed to create news notification:", error);
       }
     }
+    writeNotified(notified);
   };
 
   const getSentimentColor = (sentiment) => {
@@ -142,6 +157,10 @@ export default function NewsWidget({ assets, onNewsAlert, isCompact = false }) {
     if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
     return `${Math.floor(seconds / 86400)}d ago`;
   };
+
+  const newsFeed = Object.values(newsByAsset).flat()
+    .filter(news => selectedAsset === "all" || news.asset === selectedAsset)
+    .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
 
   const filteredNews = newsFeed.filter(news => {
     if (sentimentFilter === "all") return true;
@@ -215,7 +234,7 @@ export default function NewsWidget({ assets, onNewsAlert, isCompact = false }) {
             <Button
               variant="outline"
               size="sm"
-              onClick={fetchNewsForAssets}
+              onClick={refreshNews}
               disabled={isLoading}
               className="border-indigo-500/50 text-indigo-400 hover:bg-indigo-500/10 hover:text-indigo-300 hover:border-indigo-500"
             >
@@ -263,14 +282,22 @@ export default function NewsWidget({ assets, onNewsAlert, isCompact = false }) {
             </div>
           </div>
 
+          <p className="text-xs text-slate-500 mb-3">
+            Headlines come from a model-run web search and are not verified. Times show when a story was retrieved, not published.
+          </p>
+
           <ScrollArea className="h-96">
             <AnimatePresence>
               <div className="space-y-3">
                 {filteredNews.length === 0 ? (
                   <div className="text-center py-8">
                     <Newspaper className="w-12 h-12 text-slate-600 mx-auto mb-3" />
-                    <p className="text-slate-400">No real-time news available right now.</p>
-                    <p className="text-slate-500 text-xs mt-1">Live web search returned no headlines — try refreshing.</p>
+                    <p className="text-slate-400">No news to show right now.</p>
+                    <p className="text-slate-500 text-xs mt-1">
+                      {retryInMs > 0
+                        ? `News search is unavailable or rate limited. It can run again in about ${Math.ceil(retryInMs / 60000)} min.`
+                        : 'The last web search returned no headlines. One asset is searched at a time.'}
+                    </p>
                   </div>
                 ) : (
                   filteredNews.map((news) => (
@@ -315,8 +342,8 @@ export default function NewsWidget({ assets, onNewsAlert, isCompact = false }) {
                       <div className="flex items-center justify-between">
                         <div className="flex items-center gap-3">
                           <span className="text-xs text-slate-400">
-                            Sentiment Score: <span className={`font-bold ${news.sentiment_score > 0 ? 'text-green-400' : news.sentiment_score < 0 ? 'text-red-400' : 'text-yellow-400'}`}>
-                              {(news.sentiment_score * 100).toFixed(0)}%
+                            Model sentiment (-1 to +1): <span className={`font-bold ${news.sentiment_score > 0 ? 'text-green-400' : news.sentiment_score < 0 ? 'text-red-400' : 'text-yellow-400'}`}>
+                              {news.sentiment_score > 0 ? '+' : ''}{news.sentiment_score.toFixed(2)}
                             </span>
                           </span>
                           <span className="text-xs text-slate-500">

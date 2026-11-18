@@ -127,6 +127,9 @@ const ENTITY_NAMES = [
   'BacktestResult', 'CalibrationModel', 'ExchangeBalance', 'ExchangeConnection',
   'Notification', 'PendingTradeApproval', 'Portfolio', 'PriceAlert',
   'ScanResult', 'SignalOutcome', 'Trade', 'TradingPreferences', 'User',
+  'StrategyLabAccount', 'StrategyLabTrade', 'CommitteeDecision',
+  'V6Config', 'V6StrategyState', 'V6SignalTest', 'V6RiskEvent',
+  'V6ExchangeHealth', 'V6Certificate', 'V6EquityPoint',
 ];
 
 const entities = {};

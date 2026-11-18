@@ -163,11 +163,15 @@ export default async function(req: Request): Promise<Response> {
     const settings = await base44.asServiceRole.entities.AutoTradingSettings.filter({ created_by: user_email });
     const s = settings?.[0];
     let liveTrading = { enabled: false };
+    // LOCAL CHANGE: PAPER_ONLY lock (docs/rebuild/paper-lock.md). While locked an
+    // approval fills as paper however the settings read. Taking the live branch
+    // would only fail, and that branch books nothing. No lock value means locked.
+    const paperLocked = (globalThis as any).__CRYPTOMATE_PAPER_LOCK__?.locked !== false;
     // Fail closed: a missing timestamp means the arming sequence was never
     // completed server-side. Previously a null timestamp skipped the cooldown
     // check, allowing a direct entity write to bypass the 24h cooldown. The
     // timestamp is only set by the liveTradingControl function.
-    if (s?.live_trading_enabled && s?.exchange_connection_id && s.live_trading_requested_at) {
+    if (!paperLocked && s?.live_trading_enabled && s?.exchange_connection_id && s.live_trading_requested_at) {
       const cooldownEnd = new Date(new Date(s.live_trading_requested_at).getTime() + 24 * 60 * 60 * 1000);
       if (new Date() >= cooldownEnd) {
         const conns = await base44.asServiceRole.entities.ExchangeConnection.filter({ id: s.exchange_connection_id });

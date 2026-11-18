@@ -15,6 +15,7 @@
 import React, { useState, useEffect } from 'react';
 import { base44 } from '@/api/base44Client';
 import { AlertTriangle, Loader2, Check, RotateCcw, Archive } from 'lucide-react';
+import { v6RecordExists, V6_RESET_REFUSED } from '@/lib/v6Trades';
 
 export default function ResetTradingData() {
   const [info, setInfo] = useState(null);
@@ -24,9 +25,11 @@ export default function ResetTradingData() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [done, setDone] = useState(null);
+  const [v6Locked, setV6Locked] = useState(false);
 
   const load = async () => {
     try {
+      setV6Locked(await v6RecordExists());
       setInfo(await base44.maintenance.resetInfo());
     } catch (err) {
       setError(err.message);
@@ -40,6 +43,10 @@ export default function ResetTradingData() {
     setError(null);
     setBusy(true);
     try {
+      if (await v6RecordExists()) {
+        setV6Locked(true);
+        return;
+      }
       const result = await base44.maintenance.reset(confirm.trim(), Number(startingBalance));
       setDone(result);
       setConfirm('');
@@ -94,6 +101,20 @@ export default function ResetTradingData() {
         >
           Close
         </button>
+      </div>
+    );
+  }
+
+  if (v6Locked) {
+    return (
+      <div className="bg-slate-900/80 border border-slate-700 rounded-xl p-6">
+        <div className="flex items-start gap-3">
+          <AlertTriangle className="w-5 h-5 text-amber-400 mt-0.5" />
+          <div>
+            <h3 className="text-white font-medium">Reset trading data is not available</h3>
+            <p className="text-sm text-slate-400 mt-1">{V6_RESET_REFUSED}</p>
+          </div>
+        </div>
       </div>
     );
   }

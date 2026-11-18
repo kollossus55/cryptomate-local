@@ -40,6 +40,14 @@ The 16 backend functions run **unmodified**. They were written for Deno, so the 
 
 That matters for maintenance: when you change a function in Base44, you can copy the file across and it just works. No porting, no divergence. **One caveat since 2026-10-26:** files carried a small number of `// LOCAL FIX:` patches (bug fixes made locally that the hosted version has not received). Re-copying a file over one of these silently drops the fix — check for the marker, or diff against the D:\cryptomate-backup-20261026 snapshots, before overwriting. The trading-library copies under each function's `shared/` folder are **generated** — edit `/shared/trading/` and run `npm run sync:functions` instead of touching them.
 
+**Agent committee (phases 1-2, since 2026-11-04):** `autoTradingWorker/entry.ts` carries a `// LOCAL CHANGE:` block that runs the agent committee in **shadow mode** after each cycle's entries and logs what it would have done to the `CommitteeDecision` entity. It never places, blocks or sizes a trade. The logic lives in `shared/trading/committee.js`, synced like the rest of `/shared/trading`. Set `committee.mode` to `"off"` in `AutoTradingSettings` to disable it. Re-copying the worker from Base44 drops this block.
+
+Phase 2 adds, all local-only (no Base44 equivalent):
+- `resolveCommitteeOutcomes` — hourly job that fills each decision's forward outcome once its window has closed.
+- `EntityStore.bulkUpdate` — many patches, one file write (exposed to functions as `entities.X.bulkUpdate`).
+- `backtest.js` committee replay (`entryEngine: 'committee'`) and `npm run compare:committee` to compare both engines out of sample.
+- `committee.js` is now imported by `backtest.js`, so every function folder that has `shared/backtest.js` must also have `shared/committee.js` (the sync only refreshes files that already exist).
+
 ---
 
 ## How it runs
@@ -192,7 +200,7 @@ Back up by copying the `data` folder. That's the whole state.
 
 ## Going live
 
-Unchanged from the hosted app — same arming sequence, same 24-hour cooldown, same server-side checks.
+Live trading is off by a code lock, `PAPER_ONLY`, which no setting in the app can change. Releasing it takes a deliberate edit on this machine: see `docs/rebuild/paper-lock.md`. After a release, the arming sequence and 24-hour cooldown apply as before. While locked, `dry_run` on `liveOrderExecution` is refused; test credentials from Exchange Settings instead.
 
 The key is already set up (`EXCHANGE_ENCRYPTION_KEY` in `.env`, exactly 64
 hex chars — all consumers validate that format strictly and refuse anything
@@ -207,7 +215,7 @@ run the arming sequence with **testnet API keys** once, watching the server
 log end to end. Live orders that code never sent are the only feedback that
 counts.
 
-Create API keys with **read and spot-trade permissions only**. The app rejects any key that can withdraw.
+Create API keys with **read and spot-trade permissions only**. The app does not check this for you: confirm withdrawal rights are off on the exchange when you create the key.
 
 ---
 

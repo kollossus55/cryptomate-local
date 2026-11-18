@@ -18,8 +18,8 @@
  */
 
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
-import { readdirSync, existsSync } from 'node:fs';
+import { pathToFileURL, fileURLToPath } from 'node:url';
+import { readdirSync, existsSync, readFileSync } from 'node:fs';
 
 import { LOCAL_USER_EMAIL } from './entityStore.js';
 
@@ -30,6 +30,239 @@ const LOCAL_USER = {
   role: 'admin',
 };
 
+// ---------------------------------------------------------------------------
+// LOCAL CHANGE: PAPER_ONLY lock (V6 rebuild, docs/rebuild/paper-lock.md).
+//
+// Paper used to be paper only because no ExchangeConnection row existed. This
+// makes it a property of the code. On by default. Release needs BOTH the env
+// var AND the marker file, each holding the exact phrase, and is decided once
+// here at import: index.js has loaded .env by then, and nothing a function does
+// later (Deno.env.set included) can change the frozen result. There is
+// deliberately no API, entity or GUI path to either half.
+// ---------------------------------------------------------------------------
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+export const PAPER_LOCK_RELEASE_ENV = 'CRYPTOMATE_PAPER_LOCK_RELEASE';
+export const PAPER_LOCK_MARKER_FILE = 'PAPER_LOCK_RELEASED';
+export const PAPER_LOCK_RELEASE_PHRASE = 'I_ACCEPT_REAL_MONEY_RISK';
+
+export function resolvePaperLock({ env = process.env, root = ROOT } = {}) {
+  const envSet = env[PAPER_LOCK_RELEASE_ENV] === PAPER_LOCK_RELEASE_PHRASE;
+  let markerSet = false;
+  try {
+    const text = readFileSync(path.join(root, PAPER_LOCK_MARKER_FILE), 'utf8');
+    markerSet = text.replace(/^﻿/, '').trim() === PAPER_LOCK_RELEASE_PHRASE;
+  } catch { /* no readable marker: stays locked */ }
+  return Object.freeze({ locked: !(envSet && markerSet), envSet, markerSet });
+}
+
+const PAPER_LOCK = resolvePaperLock();
+
+// Read by the order path inside the functions, which must not import from
+// server/. They treat a missing value as locked, so this only ever matters for
+// a release, and non-writable means a function cannot forge one.
+Object.defineProperty(globalThis, '__CRYPTOMATE_PAPER_LOCK__', {
+  value: PAPER_LOCK, writable: false, configurable: false, enumerable: false,
+});
+
+/**
+ * Functions refused while locked, with the actions that stay allowed.
+ *
+ * Only these two can reach a signed order or arm one. executeApprovedTrade and
+ * autoTradingWorker are deliberately absent: both are also the PAPER path, and
+ * their only route to an order is liveOrderExecution. exchangeCredentials is
+ * absent because it signs read-only Balance calls and nothing else. Disarming
+ * stays available so a human can clear live state while locked.
+ */
+const PAPER_LOCK_DENY = new Map([
+  ['liveOrderExecution', new Set()],
+  ['liveTradingControl', new Set(['disable', 'cancel'])],
+]);
+
+export function paperLockRefusal(name, payload) {
+  if (!PAPER_LOCK.locked || !PAPER_LOCK_DENY.has(name)) return null;
+  if (PAPER_LOCK_DENY.get(name).has(payload?.action)) return null;
+  return `PAPER_ONLY lock is on: "${name}" is refused. Orders are paper. See docs/rebuild/paper-lock.md.`;
+}
+
+/** A stored value that could arm live trading. Disarming values always pass. */
+function isArmingValue(entity, field, value) {
+  const e = String(entity).toLowerCase();
+  const f = String(field).toLowerCase();
+  const empty = value === null || value === undefined;
+  if (e === 'autotradingsettings') {
+    return (f.startsWith('live_') || f === 'exchange_connection_id') && !empty && value !== false;
+  }
+  if (e === 'exchangeconnection') {
+    return f === 'trading_mode' && !empty && value !== 'simulated';
+  }
+  return false;
+}
+
+const guardedStores = new WeakSet();
+
+/**
+ * Refuse arming writes at the store, the one point the entity API and every
+ * function share. Entity names compare case-insensitively because on Windows
+ * "autotradingsettings.json" IS AutoTradingSettings.json. Rewriting a value
+ * already stored is allowed: a whole-row settings save must still work, so
+ * that a kill switch can be set even while live state exists.
+ *
+ * An update can also carry a stale arming value: a settings page loaded
+ * before liveTradingControl cleared exchange_connection_id still sends the
+ * old id with every save. Refusing the whole row would lose the kill switch,
+ * so an update drops those fields (the stored value stays) and writes the
+ * rest. An update made of nothing but arming fields is still refused.
+ */
+export function guardStoreForPaperLock(store) {
+  if (!PAPER_LOCK.locked || guardedStores.has(store)) return store;
+  guardedStores.add(store);
+
+  const check = (name, data, current) => {
+    for (const field of Object.keys(data ?? {})) {
+      if (!isArmingValue(name, field, data[field])) continue;
+      if (current && current[field] === data[field]) continue;
+      throw Object.assign(
+        new Error(`PAPER_ONLY lock is on: write to ${name}.${field} refused.`),
+        { status: 403 }
+      );
+    }
+  };
+
+  // For an update: the data minus arming fields that differ from the stored
+  // row. Refuses when only such fields were sent, so an attempt to arm is
+  // never answered with a success that changed nothing.
+  const strip = (name, data, current) => {
+    const kept = {};
+    const dropped = [];
+    for (const field of Object.keys(data ?? {})) {
+      if (isArmingValue(name, field, data[field]) && !(current && current[field] === data[field])) dropped.push(field);
+      else kept[field] = data[field];
+    }
+    if (!dropped.length) return data;
+    if (!Object.keys(kept).length) check(name, data, current);
+    console.warn(`PAPER_ONLY lock is on: ${name} update kept the stored ${dropped.join(', ')}.`);
+    return kept;
+  };
+
+  const { create, bulkCreate, update, bulkUpdate, updateMany } = store;
+  store.create = (name, data) => {
+    check(name, data);
+    return create.call(store, name, data);
+  };
+  store.bulkCreate = (name, items) => {
+    for (const data of items ?? []) check(name, data);
+    return bulkCreate.call(store, name, items);
+  };
+  store.update = (name, id, data) => update.call(store, name, id, strip(name, data, store.get(name, id)));
+  store.bulkUpdate = (name, updates) => bulkUpdate.call(
+    store, name, (updates ?? []).map((u) => ({ ...u, data: strip(name, u.data, store.get(name, u.id)) }))
+  );
+  store.updateMany = (name, query, data) => {
+    for (const row of store.list(name, { filter: query })) check(name, data, row);
+    return updateMany.call(store, name, query, data);
+  };
+  return store;
+}
+
+/**
+ * What functions read while locked. A stored ready_for_live must look like
+ * simulated, or the worker would treat itself as live, see its order refused,
+ * and "continue" past the exit: a paper stop that never fires. Only this field
+ * is masked, so AutoTradingSettings stays truthful for the V6 banner.
+ */
+function maskConnection(entity, row) {
+  if (!PAPER_LOCK.locked || String(entity).toLowerCase() !== 'exchangeconnection') return row;
+  return row?.trading_mode === 'ready_for_live' ? { ...row, trading_mode: 'simulated' } : row;
+}
+
+/**
+ * Last line of defence: a future caller could sign an order without going
+ * through any function above. Only the two read-only Balance calls that
+ * credential testing uses may carry a signature while locked.
+ */
+const EXCHANGE_HOST = /(^|\.)(kraken|okx|binance|bybit|coinbase|kucoin|gate|gateio|bitget|mexc|bitfinex|htx|huobi)\.(com|io|us)$/i;
+
+export function paperLockFetchRefusal(input, init = {}) {
+  let url;
+  try { url = new URL(typeof input === 'string' ? input : (input?.url ?? String(input))); }
+  catch { return null; }
+  if (!EXCHANGE_HOST.test(url.hostname)) return null;
+
+  const method = String(init.method ?? input?.method ?? 'GET').toUpperCase();
+  const signed = new Headers(init.headers ?? input?.headers ?? {}).has('OK-ACCESS-SIGN');
+  const krakenPrivate = /(^|\.)kraken\.com$/i.test(url.hostname) && url.pathname.startsWith('/0/private/');
+
+  if (krakenPrivate && url.pathname === '/0/private/Balance') return null;
+  if (signed && method === 'GET' && url.pathname === '/api/v5/account/balance') return null;
+  if (!krakenPrivate && !signed && method === 'GET') return null;
+  return `PAPER_ONLY lock is on: ${method} ${url.hostname}${url.pathname} refused.`;
+}
+
+if (PAPER_LOCK.locked) {
+  const nextFetch = globalThis.fetch;
+  globalThis.fetch = (input, init) => {
+    const refusal = paperLockFetchRefusal(input, init);
+    if (!refusal) return nextFetch(input, init);
+    console.error(refusal);
+    return Promise.reject(Object.assign(new Error(refusal), { paperLock: true }));
+  };
+}
+
+let paperLockFindings = [];
+
+/** For /api/health and so the Trading page. Field names only, never values. */
+export function paperLockStatus() {
+  return { locked: PAPER_LOCK.locked, liveStateFound: paperLockFindings };
+}
+
+/**
+ * Boot check. Logs, never throws and never stops the scheduler: exits and paper
+ * trading must carry on, and the guards above already make the state inert.
+ * Stored rows are left as found, so the evidence survives for a human.
+ */
+export function assertPaperLockAtBoot({ store, log }) {
+  if (!PAPER_LOCK.locked) {
+    log.error('!'.repeat(58));
+    log.error('PAPER_ONLY lock RELEASED by env var and marker file.');
+    log.error('REAL ORDERS ARE POSSIBLE on this server.');
+    log.error('!'.repeat(58));
+    return paperLockStatus();
+  }
+
+  log.info('PAPER_ONLY lock: ON. No order can reach an exchange.');
+  if (PAPER_LOCK.envSet !== PAPER_LOCK.markerSet) {
+    log.warn(`PAPER_ONLY lock: only ${PAPER_LOCK.envSet ? 'the env var' : 'the marker file'} is set. Both are required, so it stays ON.`);
+  }
+
+  const findings = [];
+  try {
+    for (const name of ['AutoTradingSettings', 'ExchangeConnection']) {
+      for (const row of store.list(name, {})) {
+        for (const field of Object.keys(row)) {
+          if (isArmingValue(name, field, row[field])) findings.push(`${name}.${field}`);
+        }
+      }
+    }
+    const keys = store.list('ExchangeConnection', {}).length;
+    if (keys) log.warn(`PAPER_ONLY lock: ${keys} stored exchange connection(s). Read-only use only.`);
+  } catch (err) {
+    findings.push('scan failed');
+    log.error(`PAPER_ONLY lock: could not scan for live state: ${err.message}`);
+  }
+
+  paperLockFindings = [...new Set(findings)];
+  if (paperLockFindings.length) {
+    log.error('!'.repeat(58));
+    log.error(`LIVE STATE FOUND while PAPER_ONLY is on: ${paperLockFindings.join(', ')}`);
+    log.error('Refusing to arm. It is ignored: trading stays paper, exits keep running.');
+    log.error('Clear it with the liveTradingControl "cancel" action once reviewed.');
+    log.error('!'.repeat(58));
+  }
+  return paperLockStatus();
+}
+
 /**
  * The SDK surface the functions use.
  *
@@ -39,14 +272,19 @@ const LOCAL_USER = {
  * edits.
  */
 export function makeBase44Shim(store, { getRegistry } = {}) {
+  // LOCAL CHANGE: PAPER_ONLY lock, see guardStoreForPaperLock and maskConnection.
+  guardStoreForPaperLock(store);
+
   const collection = (name) => ({
-    list: async (sort, limit) => store.list(name, { sort, limit }),
-    filter: async (query, sort, limit) => store.list(name, { filter: query, sort, limit }),
-    get: async (id) => store.get(name, id),
+    list: async (sort, limit) => store.list(name, { sort, limit }).map((r) => maskConnection(name, r)),
+    filter: async (query, sort, limit) => store.list(name, { filter: query, sort, limit }).map((r) => maskConnection(name, r)),
+    get: async (id) => maskConnection(name, store.get(name, id)),
     create: async (data) => store.create(name, data),
     bulkCreate: async (rows) => store.bulkCreate(name, rows),
     update: async (id, data) => store.update(name, id, data),
     updateMany: async (query, data) => store.updateMany(name, query, data),
+    // LOCAL CHANGE (agent committee): local-only batch update, one file write.
+    bulkUpdate: async (updates) => store.bulkUpdate(name, updates),
     delete: async (id) => store.delete(name, id),
     deleteMany: async (query) => store.deleteMany(name, query),
   });
@@ -261,6 +499,10 @@ export class FunctionRegistry {
       const entry = path.join(this.dir, name, 'entry.ts');
       if (!existsSync(entry)) continue;
 
+      // LOCAL CHANGE: PAPER_ONLY lock. A fully denied function is never even
+      // imported, so no handler for it exists in this process.
+      if (paperLockRefusal(name, {}) && PAPER_LOCK_DENY.get(name).size === 0) continue;
+
       try {
         capturedHandler = null;
         const mod = await import(pathToFileURL(entry).href);
@@ -304,6 +546,17 @@ export class FunctionRegistry {
    * nothing to authenticate against locally.
    */
   async invoke(name, payload) {
+    // LOCAL CHANGE: PAPER_ONLY lock. Every route in (HTTP, scheduler, function to
+    // function) comes through here. Checked before the handler lookup.
+    const refusal = paperLockRefusal(name, payload);
+    if (refusal) {
+      this.log?.warn(refusal);
+      throw Object.assign(new Error(refusal), {
+        status: 403,
+        body: { success: false, error: refusal, paper_lock: true },
+      });
+    }
+
     const handler = this.handlers.get(name);
     if (!handler) {
       const reason = this.loadErrors.get(name);

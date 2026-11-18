@@ -89,7 +89,7 @@ export default function Insights() {
             </div>
             <div className="flex-1">
               <h3 className="text-xl font-semibold text-white mb-2">
-                AI-Powered Performance Analysis
+                Model-written performance review
               </h3>
               <p className="text-slate-300 mb-3">
                 Our advanced AI analyzes your trading history, identifies patterns, and provides actionable 
@@ -130,7 +130,7 @@ export default function Insights() {
                 </h3>
                 <p className="text-yellow-200 mb-3">
                   You currently have {trades.length} trade{trades.length !== 1 ? 's' : ''}. 
-                  Complete at least 5 trades to unlock AI-powered insights and personalized recommendations.
+                  Complete at least 5 trades to see a model-written review. It can be wrong.
                 </p>
                 <p className="text-yellow-200/80 text-sm">
                   💡 Tip: Start trading on the Trading page to build your history and get valuable insights!
