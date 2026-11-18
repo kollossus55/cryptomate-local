@@ -8,7 +8,6 @@ const MESSAGES = {
   default:
     'This belongs to the old engine, not V6. Nothing here changes V6. Measured net of costs, that engine ' +
     'lost money in 9 of 9 ninety-day windows on 4h and 8 of 9 on 1h. Scores here are not odds.',
-  StrategyLab: 'Separate paper experiment. Not V6. Its two rules are not clean on the holdout period.',
 };
 
 export default function LegacyBanner({ page }) {

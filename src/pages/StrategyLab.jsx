@@ -114,8 +114,8 @@ export default function StrategyLab() {
         <div>
           <h1 className="flex items-center gap-2 text-2xl font-bold text-slate-100"><FlaskConical className="h-6 w-6" /> Strategy Lab</h1>
           <p className="mt-1 max-w-3xl text-sm text-slate-400">
-            Daily strategies paper-trading side by side, each with its own virtual $10,000. Separate from your main
-            portfolio and its risk settings, and never places real orders.
+            Daily strategies paper-trading side by side, each with its own virtual $10,000. Not part of V6: separate from
+            its portfolio, risk settings and certification, and never places real orders.
             {started && <> Running since {started}.</>} {lastMark && <> Last update {lastMark}.</>}
           </p>
         </div>
