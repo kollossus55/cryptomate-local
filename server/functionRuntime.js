@@ -108,6 +108,12 @@ const guardedStores = new WeakSet();
  * "autotradingsettings.json" IS AutoTradingSettings.json. Rewriting a value
  * already stored is allowed: a whole-row settings save must still work, so
  * that a kill switch can be set even while live state exists.
+ *
+ * An update can also carry a stale arming value: a settings page loaded
+ * before liveTradingControl cleared exchange_connection_id still sends the
+ * old id with every save. Refusing the whole row would lose the kill switch,
+ * so an update drops those fields (the stored value stays) and writes the
+ * rest. An update made of nothing but arming fields is still refused.
  */
 export function guardStoreForPaperLock(store) {
   if (!PAPER_LOCK.locked || guardedStores.has(store)) return store;
@@ -124,6 +130,22 @@ export function guardStoreForPaperLock(store) {
     }
   };
 
+  // For an update: the data minus arming fields that differ from the stored
+  // row. Refuses when only such fields were sent, so an attempt to arm is
+  // never answered with a success that changed nothing.
+  const strip = (name, data, current) => {
+    const kept = {};
+    const dropped = [];
+    for (const field of Object.keys(data ?? {})) {
+      if (isArmingValue(name, field, data[field]) && !(current && current[field] === data[field])) dropped.push(field);
+      else kept[field] = data[field];
+    }
+    if (!dropped.length) return data;
+    if (!Object.keys(kept).length) check(name, data, current);
+    console.warn(`PAPER_ONLY lock is on: ${name} update kept the stored ${dropped.join(', ')}.`);
+    return kept;
+  };
+
   const { create, bulkCreate, update, bulkUpdate, updateMany } = store;
   store.create = (name, data) => {
     check(name, data);
@@ -133,14 +155,10 @@ export function guardStoreForPaperLock(store) {
     for (const data of items ?? []) check(name, data);
     return bulkCreate.call(store, name, items);
   };
-  store.update = (name, id, data) => {
-    check(name, data, store.get(name, id));
-    return update.call(store, name, id, data);
-  };
-  store.bulkUpdate = (name, updates) => {
-    for (const { id, data } of updates ?? []) check(name, data, store.get(name, id));
-    return bulkUpdate.call(store, name, updates);
-  };
+  store.update = (name, id, data) => update.call(store, name, id, strip(name, data, store.get(name, id)));
+  store.bulkUpdate = (name, updates) => bulkUpdate.call(
+    store, name, (updates ?? []).map((u) => ({ ...u, data: strip(name, u.data, store.get(name, u.id)) }))
+  );
   store.updateMany = (name, query, data) => {
     for (const row of store.list(name, { filter: query })) check(name, data, row);
     return updateMany.call(store, name, query, data);

@@ -4,7 +4,9 @@
  *
  * Prints what is actually installed and wired, so "it should be fixed" can be
  * checked rather than assumed. Reads nothing from the network and changes
- * nothing on disk, so it is safe to run while the server is up.
+ * nothing on disk, so it is safe to run while the server is up: every read
+ * goes through a read-only store, which reports damage instead of repairing
+ * it (repairing is the server's job, and it holds its own copy in memory).
  */
 
 import { register } from 'node:module';
@@ -24,6 +26,17 @@ console.log(`Folder: ${ROOT}\n`);
 
 let problems = 0;
 
+// One read-only store for every section. Created lazily so a broken import is
+// reported in the section that needed it.
+let sharedStore = null;
+async function readOnlyStore() {
+  if (!sharedStore) {
+    const { EntityStore } = await import(`${pathToFileURL(path.join(ROOT, 'server/entityStore.js')).href}`);
+    sharedStore = new EntityStore(path.join(ROOT, 'data'), { readOnly: true });
+  }
+  return sharedStore;
+}
+
 // ── Build marker ──────────────────────────────────────────────────────────
 console.log('Build');
 const indexSrc = existsSync(path.join(ROOT, 'server/index.js'))
@@ -41,10 +54,9 @@ console.log('\nSDK shim surface');
 register('./loaderHooks.js', pathToFileURL(path.join(ROOT, 'server/')).href);
 
 try {
-  const { EntityStore } = await import(`${pathToFileURL(path.join(ROOT, 'server/entityStore.js')).href}`);
   const { makeBase44Shim } = await import(`${pathToFileURL(path.join(ROOT, 'server/functionRuntime.js')).href}`);
 
-  const store = new EntityStore(path.join(ROOT, 'data'));
+  const store = await readOnlyStore();
   const client = makeBase44Shim(store, { getRegistry: () => null });
 
   // Every path the backend functions actually use.
@@ -97,8 +109,7 @@ try {
 // The settings that silently produce zero trades.
 console.log('\nTrading configuration');
 try {
-  const { EntityStore } = await import(`${pathToFileURL(path.join(ROOT, 'server/entityStore.js')).href}`);
-  const store = new EntityStore(path.join(ROOT, 'data'));
+  const store = await readOnlyStore();
   const all = store.list('AutoTradingSettings', {});
 
   if (all.length === 0) {
@@ -111,8 +122,9 @@ try {
     if (s.is_enabled) { bad('legacy auto-trading is ON — V6 blocks entries until it is off'); problems++; }
     else ok('legacy auto-trading off');
 
-    if (s.kill_switch_enabled) { bad('kill switch is ON — nothing will trade'); problems++; }
-    if (s.execution_mode === 'browser') { bad("execution_mode is 'browser' — the server scheduler skips this account"); problems++; }
+    // Legacy-only settings: V6 reads neither, so they are notes, not problems.
+    if (s.kill_switch_enabled) info('legacy kill switch is on (V6 does not read it; V6 has its own halt)');
+    if (s.execution_mode === 'browser') info("legacy execution_mode is 'browser' (V6 does not read it)");
 
     const aiMode = s.ai_confirmation_mode || 'off';
     const llmConfigured = Boolean(process.env.LLM_PROVIDER && process.env.LLM_API_KEY);
@@ -145,8 +157,7 @@ try {
 // ── V6 paper engine ───────────────────────────────────────────────────────
 console.log('\nV6 engine');
 try {
-  const { EntityStore } = await import(`${pathToFileURL(path.join(ROOT, 'server/entityStore.js')).href}`);
-  const store = new EntityStore(path.join(ROOT, 'data'));
+  const store = await readOnlyStore();
   const portfolios = store.list('Portfolio', {});
   const row = portfolios.find((p) => p.v6_state);
 
@@ -178,6 +189,17 @@ try {
 } catch (err) {
   bad(`could not read V6 state: ${err.message}`);
   problems++;
+}
+
+// ── Store files ───────────────────────────────────────────────────────────
+// Damage found while reading above. Left as found: the server restores these
+// from their good copies when it next loads them (at its next start).
+if (sharedStore?.damaged.size) {
+  console.log('\nStore files');
+  for (const [entity, why] of sharedStore.damaged) {
+    bad(`${entity}.json is ${why}; its good copy was read instead. Restart the server to restore it (this raises a V6 alarm to acknowledge).`);
+    problems++;
+  }
 }
 
 console.log(`\n${'-'.repeat(56)}`);

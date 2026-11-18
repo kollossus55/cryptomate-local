@@ -420,6 +420,21 @@ try {
     }
   });
 
+  await test('a stale settings page can still save the kill switch; the stale id is not written', async () => {
+    const seed = await call('POST', '/api/entities/AutoTradingSettings', { is_enabled: false, created_by: EMAIL, exchange_connection_id: null });
+    assert.strictEqual(seed.status, 200);
+    const id = seed.json.id;
+    // The page loaded before liveTradingControl 'cancel' cleared the connection id.
+    const stale = { ...seed.json, exchange_connection_id: kraken, kill_switch_enabled: true };
+    const res = await call('PATCH', `/api/entities/AutoTradingSettings/${id}`, stale);
+    assert.strictEqual(res.status, 200, JSON.stringify(res.json));
+    const row = readEntity('AutoTradingSettings').find((r) => r.id === id);
+    assert.strictEqual(row.kill_switch_enabled, true, 'kill switch stored');
+    assert.strictEqual(row.exchange_connection_id, null, 'stale arming value not written');
+    const only = await call('PATCH', `/api/entities/AutoTradingSettings/${id}`, { exchange_connection_id: kraken });
+    assert.strictEqual(only.status, 403, 'an update of arming fields alone is still refused');
+  });
+
   await test('no HTTP route releases the lock', async () => {
     await invoke('exchangeCredentials', { action: 'unlock', [ENV_NAME]: PHRASE });
     await call('POST', '/api/paper-lock', { locked: false });

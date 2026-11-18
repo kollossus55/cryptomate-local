@@ -18,7 +18,21 @@ import {
  * Fully separate from the main auto-trader: it never reads or writes
  * Portfolio, Trade, AutoTradingSettings or risk settings, and never places an
  * exchange order. Paper only.
+ *
+ * Fills go out through an outbox: each account's new fills are saved in the
+ * same write as its new positions and cash (pending_trades), then created
+ * with fixed ids and cleared. A run that fails in between is finished by the
+ * next one, and a fill that already exists is never written twice.
  */
+
+async function flushPendingTrades(Accounts: any, Trades: any, account: any) {
+  const pending = account.pending_trades || [];
+  if (!pending.length) return account;
+  const existing = new Set(((await Trades.filter({ id: { $in: pending.map((t: any) => t.id) } })) || []).map((t: any) => t.id));
+  const missing = pending.filter((t: any) => !existing.has(t.id));
+  if (missing.length) await Trades.bulkCreate(missing);
+  return await Accounts.update(account.id, { pending_trades: [] });
+}
 
 async function fetchDailyCandles(symbols: string[], now: number) {
   // Uncached on purpose: the shared candle cache refreshes at UTC midnight,
@@ -56,6 +70,8 @@ export default async function (req: Request): Promise<Response> {
 
     const rows = (await Accounts.list()) || [];
     const accounts = new Map(rows.map((r: any) => [r.strategy_id, r]));
+    // Fills a failed run left behind, before anything new is decided.
+    for (const [sid, r] of accounts) accounts.set(sid, await flushPendingTrades(Accounts, Trades, r));
     for (const s of LAB_STRATEGIES) {
       if (!accounts.has(s.id)) {
         const created = await Accounts.create(newLabAccount(s, { now, btcPrice: prices.get('BTCUSDT') }));
@@ -69,18 +85,17 @@ export default async function (req: Request): Promise<Response> {
     const candles = due ? await fetchDailyCandles(LAB_UNIVERSE, now) : new Map();
 
     const summary: any[] = [];
-    const newTrades: any[] = [];
     for (const strategy of LAB_STRATEGIES) {
       const row = accounts.get(strategy.id);
       // Without fresh candles, only stops and marking run (no decision possible).
       const market = { candles: due && candles.get('BTCUSDT') ? candles : new Map(), prices };
-      const { id, created_date, updated_date, created_by, ...state } = row;
+      const { id, created_date, updated_date, created_by, pending_trades: _p, ...state } = row;
       const { account, trades, decided } = runLabStep({ account: structuredClone(state), strategy, market, now });
-      await Accounts.update(id, account);
-      newTrades.push(...trades);
+      const pending = trades.map((t: any, i: number) => ({ ...t, id: t.id || `lab-${strategy.id}-${now}-${i}` }));
+      const saved = await Accounts.update(id, { ...account, pending_trades: pending });
+      await flushPendingTrades(Accounts, Trades, saved);
       summary.push({ strategy: strategy.id, equity: Math.round(account.last_equity), positions: Object.keys(account.positions).length, trades: trades.length, decided });
     }
-    if (newTrades.length) await Trades.bulkCreate(newTrades);
 
     for (const s of summary) {
       console.log(`[strategyLab] ${s.strategy}: equity $${s.equity}, ${s.positions} open, ${s.trades} fills${s.decided ? ' (daily decision)' : ''}`);

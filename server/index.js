@@ -14,6 +14,7 @@ import { createServer } from 'node:http';
 import { register } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import path from 'node:path';
+import { networkInterfaces } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { existsSync, mkdirSync, writeFileSync, readFileSync, statSync } from 'node:fs';
 
@@ -54,6 +55,28 @@ const BUILD = '2026-10-27.1 — browser execution removed, worker is sole execut
 
 const PORT = Number(process.env.PORT || 8788);
 const HOST = process.env.HOST || '127.0.0.1';
+
+/**
+ * Host names this app answers to, in the form a Host header carries them
+ * (IPv6 in brackets). Both the Host check and the Origin check use this one
+ * list, so an address that can read can also save. Bound to every interface
+ * (HOST=0.0.0.0 or ::), the machine's own IP addresses are added: an IP
+ * literal cannot be rebound by DNS. ALLOWED_HOSTS in .env adds more names.
+ */
+function allowedHosts() {
+  const bracket = (h) => (h.includes(':') && !h.startsWith('[') ? `[${h}]` : h);
+  const set = new Set(['localhost', '127.0.0.1', '[::1]', bracket(HOST.toLowerCase())]);
+  if (HOST === '0.0.0.0' || HOST === '::') {
+    for (const addrs of Object.values(networkInterfaces())) {
+      for (const a of addrs ?? []) set.add(bracket(a.address.toLowerCase().replace(/%.*$/, '')));
+    }
+  }
+  for (const h of String(process.env.ALLOWED_HOSTS ?? '').split(',')) {
+    if (h.trim()) set.add(bracket(h.trim().toLowerCase()));
+  }
+  return set;
+}
+const ALLOWED_HOSTS = allowedHosts();
 
 const log = new Logger({ dir: path.join(DATA, 'logs') });
 const store = new EntityStore(DATA);
@@ -152,12 +175,12 @@ function refuseCrossSite(req, segments) {
   const hostName = String(req.headers.host ?? '').replace(/:\d+$/, '').toLowerCase();
   // A rebound DNS name reaches this port with a Host that is not ours. Reads count: the page
   // that rebound it is same-origin to itself and could read every answer.
-  if (hostName && ![HOST, 'localhost', '127.0.0.1', '[::1]'].includes(hostName)) {
+  if (hostName && !ALLOWED_HOSTS.has(hostName)) {
     return { status: 403, error: 'Refused: this request did not come from this app.' };
   }
   if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return null;
   const origin = req.headers.origin;
-  const own = [HOST, 'localhost', '127.0.0.1'].map((h) => `http://${h}:${PORT}`);
+  const own = [...ALLOWED_HOSTS].map((h) => `http://${h}:${PORT}`);
   if (origin && !own.includes(origin) && !DEV_ORIGINS.has(origin)) {
     return { status: 403, error: 'Refused: this request came from another site.' };
   }

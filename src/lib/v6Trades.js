@@ -10,8 +10,9 @@ export const V6_RESET_REFUSED =
   'or leave the V6 ledger out of step with the portfolio.';
 
 /**
- * True once V6 has written anything to the account: a ledger on any Portfolio
- * row, or any V6 trade. Legacy resets must stop when this is true. A failed read
+ * True once V6 has written anything to the account: a ledger or engine state on
+ * any Portfolio row (the same test as isV6Record in server/entityStore.js), or
+ * any V6 trade. Legacy resets must stop when this is true. A failed read
  * rejects, and callers treat that as "do not reset".
  */
 export async function v6RecordExists() {
@@ -19,5 +20,5 @@ export async function v6RecordExists() {
     base44.entities.Portfolio.list(),
     base44.entities.Trade.filter({ exchange: V6_EXCHANGE }, '-created_date', 1),
   ]);
-  return portfolios.some((p) => p.v6_ledger) || v6Trades.length > 0;
+  return portfolios.some((p) => p.v6_ledger || p.v6_state) || v6Trades.length > 0;
 }

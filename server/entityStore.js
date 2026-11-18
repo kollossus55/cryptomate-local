@@ -48,9 +48,20 @@ function writeAtomic(file, rows) {
 const KEEP_GOOD_COPY = new Set(['Portfolio', 'V6Config', 'V6StrategyState', 'V6Certificate', 'AutoTradingSettings']);
 
 export class EntityStore {
-  constructor(dataDir) {
+  /**
+   * readOnly: for tools such as the doctor that run beside the server. Nothing
+   * is written, copied or restored; damage the server would repair is noted in
+   * `damaged` and the good copy's rows are returned so the tool can report it.
+   * Any write throws.
+   */
+  constructor(dataDir, { readOnly = false } = {}) {
     this.dir = path.join(dataDir, 'entities');
-    if (!existsSync(this.dir)) mkdirSync(this.dir, { recursive: true });
+    this.readOnly = readOnly;
+    this.damaged = new Map();
+    if (!existsSync(this.dir)) {
+      if (readOnly) throw new Error(`no data folder at ${this.dir}`);
+      mkdirSync(this.dir, { recursive: true });
+    }
     this.cache = new Map();
     this.unreadable = new Map();
     // Windows file names ignore case, so 'TRADE' and 'Trade' are one file. They must be
@@ -99,8 +110,8 @@ export class EntityStore {
       return this._unreadable(entity, file, err);
     }
     this.unreadable.delete(entity);
-    if (keepsCopy && !existsSync(good)) writeAtomic(good, rows);
-    // _save writes both files, so an empty file beside a full copy did not come from here.
+    if (keepsCopy && !existsSync(good) && !this.readOnly) writeAtomic(good, rows);
+    // _save writes the good copy first, so an empty file beside a full copy did not come from here.
     if (keepsCopy && rows.length === 0 && this._goodHasRows(good)) return this._restore(entity, file, 'empty');
     this.cache.set(entity, rows);
     return rows;
@@ -113,6 +124,10 @@ export class EntityStore {
   // Unreadable is never empty: an empty answer would let a caller start the account over,
   // or write a new file over the only copy of the history.
   _unreadable(entity, file, err) {
+    if (this.readOnly) {
+      if (KEEP_GOOD_COPY.has(entity) && existsSync(`${file}.good`)) return this._restore(entity, file, 'unreadable');
+      throw Object.assign(new Error(`${entity}.json is unreadable (${err.message}) and has no good copy.`), { status: 503, code: 'ENTITY_UNREADABLE', entity });
+    }
     if (!this.unreadable.has(entity)) {
       const salvage = `${file}.corrupt-${Date.now()}`;
       try { copyFileSync(file, salvage); } catch { /* best effort */ }
@@ -131,6 +146,11 @@ export class EntityStore {
 
   _restore(entity, file, why) {
     const rows = parseRows(`${file}.good`);
+    if (this.readOnly) {
+      this.damaged.set(entity, why);
+      this.cache.set(entity, rows);
+      return rows;
+    }
     writeAtomic(file, rows);
     this.cache.set(entity, rows);
     this.unreadable.delete(entity);
@@ -151,9 +171,13 @@ export class EntityStore {
 
   _save(name, rows) {
     const entity = this.canonicalName(name);
+    if (this.readOnly) throw new Error(`read-only store: ${entity} was not written`);
     const file = this._file(entity);
-    writeAtomic(file, rows);
+    // Good copy first. A crash between the two writes then leaves the main file one
+    // write behind, which reads as normal, never an empty file beside a full copy,
+    // which _load would treat as damage and restore (bringing deleted rows back).
     if (KEEP_GOOD_COPY.has(entity)) writeAtomic(`${file}.good`, rows);
+    writeAtomic(file, rows);
     this.cache.set(entity, rows);
   }
 
